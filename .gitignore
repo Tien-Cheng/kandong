@@ -1,0 +1,7 @@
+.build/
+build/
+.swiftpm/
+Data/cedict_ts.u8
+Data/hsk.tsv
+*.xcodeproj
+.DS_Store
