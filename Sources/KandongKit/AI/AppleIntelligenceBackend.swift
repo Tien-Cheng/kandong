@@ -105,7 +105,7 @@ public struct AppleIntelligenceBackend: AIBackend {
     public let label = BackendConfig.appleIntelligence.name
 
     /// The on-device model misses most 多音字 and sometimes "corrects" a right reading into a wrong
-    /// one (see `PolyphoneEval`), so it only translates and the dictionary readings stand.
+    /// one (see `KandongEval`), so it only translates and the dictionary readings stand.
     public let correctsReadings = false
     let client: AppleModelClient
 

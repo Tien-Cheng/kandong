@@ -32,7 +32,7 @@ scripts/make-signing-identity.sh   # once: stable self-signed identity, so permi
 scripts/build-app.sh --install     # downloads dictionary data, builds, installs to ~/Applications, launches
 ```
 
-Tests: `swift test`. Live Codex round-trips: `KANDONG_LIVE=1 swift test --filter LiveCodexTests`. Releases are built by GitHub Actions; see [RELEASING.md](RELEASING.md).
+Tests: `swift test`. Live Codex round-trips: `KANDONG_LIVE=1 swift test --filter LiveCodexTests`. Backend eval (多音字, Translation fidelity, Reverse, Explain, latency): `KANDONG_LIVE=1 KANDONG_EVAL_BACKEND=apple swift test --filter KandongEval`; set `KANDONG_EVAL_BACKEND` to `codex` or to an LM Studio model, e.g. `KANDONG_EVAL_BACKEND='lmstudio:google/gemma-4-e4b'`. Releases are built by GitHub Actions; see [RELEASING.md](RELEASING.md).
 
 ## Use
 
