@@ -62,7 +62,7 @@ public enum BackendError: LocalizedError, Equatable {
     case contextTooLong
     /// The model declined to answer (content guardrails).
     case refused(name: String)
-    /// The model gave the text back instead of translating it.
+    /// The model gave the text back, or only part of it, instead of translating it all.
     case untranslated
 
     public var errorDescription: String? {
@@ -88,7 +88,7 @@ public enum BackendError: LocalizedError, Equatable {
         case .contextTooLong:
             "The text is too long for this model."
         case .untranslated:
-            "The AI gave the text back without translating it."
+            "The AI didn't translate all of the text."
         case .refused(let name):
             "\(name) declined this text — try another backend."
         }

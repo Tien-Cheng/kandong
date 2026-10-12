@@ -251,15 +251,19 @@ public struct LookupEngine: Sendable {
         return done
     }
 
-    /// Whether a reply copied the Chinese instead of translating it: it keeps at least half of the
-    /// source's Chinese characters and adds little English of its own. A real translation that quotes
-    /// a sign or a name in Chinese adds plenty of English, so it passes.
+    /// Whether a reply didn't really translate its source:
+    /// - it copied the Chinese, keeping at least half of the source's Chinese characters and adding
+    ///   little English (a translation that quotes a sign or a name in Chinese adds plenty, so it passes);
+    /// - or it summarised or dropped part of it: English runs two to four letters per Chinese
+    ///   character, so a reply with fewer than 0.6 can't be the whole text.
     static func isUntranslated(english reply: String, source: String) -> Bool {
         let sourceHan = source.filter(\.isHan).count
         guard sourceHan >= 4 else { return false }
         let latin: (String) -> Int = { $0.filter { $0.isLetter && !$0.isHan }.count }
         let addedEnglish = latin(reply) - latin(source)
-        return reply.filter(\.isHan).count * 2 >= sourceHan && addedEnglish * 2 < sourceHan
+        let copied = reply.filter(\.isHan).count * 2 >= sourceHan && addedEnglish * 2 < sourceHan
+        let cutShort = sourceHan >= 20 && addedEnglish * 5 < sourceHan * 3
+        return copied || cutShort
     }
 
     /// Whether English has words to translate, beyond URLs, @mentions, #hashtags and numbers that are

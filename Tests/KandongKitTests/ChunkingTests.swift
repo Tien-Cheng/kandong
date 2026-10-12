@@ -110,7 +110,7 @@ private struct EchoOnceBackend: AIBackend {
         let text = String(request.user[request.user.range(of: "Text:\n")!.upperBound...])
             .components(separatedBy: "\n\nDictionary pinyin:")[0]
         let sentences = TextChunker.sentences(text).count
-        let translation = sentences > 1 ? text : "Sentence"
+        let translation = sentences > 1 ? text : String(repeating: "ab", count: text.filter(\.isHan).count)
         return AsyncThrowingStream { continuation in
             continuation.yield(#"{"translation": "\#(translation)", "readingCorrections": []}"#)
             continuation.finish()
@@ -231,6 +231,10 @@ struct ChunkingTests {
         let mixed = "今天的会议改到明天下午了. The agenda stays the same."
         #expect(LookupEngine.isUntranslated(english: mixed, source: mixed))
         #expect(!LookupEngine.isUntranslated(english: "你好", source: "你好"))
+        // A summary of a long text is caught; a full translation of it isn't.
+        let long = String(repeating: "今天下午我们一起去图书馆看书。", count: 3)
+        #expect(LookupEngine.isUntranslated(english: "We read books.", source: long))
+        #expect(!LookupEngine.isUntranslated(english: String(repeating: "This afternoon we went to the library to read. ", count: 3), source: long))
     }
 
     @Test func knowsWhatEnglishNeedsTranslating() {
@@ -311,6 +315,11 @@ struct LiveChunkingTests {
         let (translation, _) = try await engine.learn(engine.offline(text), backend: AppleIntelligenceBackend()) { await events.add($0) }
         let total = await events.last?.totalParts ?? 1
         print("\(text.count) characters → \(total) parts, \(translation.count) characters of English in \(Int(Date().timeIntervalSince(started)))s")
+        var previous = 0
+        for event in await events.events where event.translation.count != previous {
+            print("after \(event.completedParts) parts: +\(event.translation.count - previous) characters")
+            previous = event.translation.count
+        }
         for event in await events.events { print("progress: \(event.completedParts)/\(event.totalParts ?? 0) → \(event.translation.count) chars") }
         let pattern = try Regex(#"[Dd]ay (\d+)|(\d+)(?:st|nd|rd|th) day"#)
         let days = Set(translation.matches(of: pattern).compactMap { match in
