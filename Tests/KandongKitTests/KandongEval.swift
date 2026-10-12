@@ -12,7 +12,8 @@ private let evalEnabled = ProcessInfo.processInfo.environment["KANDONG_LIVE"] ==
 ///     KANDONG_LIVE=1 KANDONG_EVAL_BACKEND=lmstudio:google/gemma-4-e4b swift test --filter KandongEval
 ///
 /// `KANDONG_EVAL_BACKEND` is `apple` (the default), `codex`, or `lmstudio:<model id>` (LM Studio at localhost:1234);
-/// `KANDONG_EVAL_TIMEOUT` caps each call (seconds, default 90).
+/// `KANDONG_EVAL_TIMEOUT` caps each call (seconds, default 90). A timed-out Codex call isn't interrupted (the Codex
+/// Backend doesn't stop a running turn), so it may keep running while the next case starts.
 ///
 /// Apple Intelligence on macOS 27.0.1 (AFM 3 Core Advanced) fixed 1 多音字, missed 2–3 and turned 1–3 readings
 /// wrong (e.g. 还给 huán → hái) over two runs, which is why it has `correctsReadings = false`.
@@ -20,7 +21,7 @@ private let evalEnabled = ProcessInfo.processInfo.environment["KANDONG_LIVE"] ==
 struct KandongEval {
     static let backendName = evalBackendName
     /// Seconds before a call counts as failed; thinking models can reason for minutes.
-    static let timeout = Double(ProcessInfo.processInfo.environment["KANDONG_EVAL_TIMEOUT"] ?? "") ?? 90
+    static let timeout = Double(ProcessInfo.processInfo.environment["KANDONG_EVAL_TIMEOUT"] ?? "").flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? 90
 
     static func backend(named name: String) -> AIBackend? {
         switch name {
@@ -55,7 +56,7 @@ struct KandongEval {
 
     struct Check {
         var text: String
-        /// Must appear exactly (case-sensitive).
+        /// Must appear exactly (case-sensitive), not as part of a longer token: `#CET60` doesn't keep `#CET6`.
         var keep: [String] = []
         /// Each group needs one of its options (case-insensitive).
         var anyOf: [[String]] = []
@@ -214,13 +215,14 @@ struct KandongEval {
                 guard let text = await call("explain", {
                     var text = ""
                     for try await delta in engine.explain(check.text, translation: nil, backend: backend) { text += delta }
-                    return Prompts.visibleText(text)
+                    text = Prompts.visibleText(text)
+                    if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { throw BackendError.failed("empty reply") }
+                    return text
                 }) else {
                     score("explain", check.text, ["error: \(calls.last?.error ?? "")"])
                     continue
                 }
                 var problems = KandongEval.missing(check, in: text)
-                if text.isEmpty { problems.append("empty") }
                 if KandongEval.isUntranslated(text) { problems.append("not in English") }
                 if !["**", "- ", "#"].contains(where: text.contains) { problems.append("no Markdown") }
                 score("explain", check.text, problems)
@@ -237,7 +239,7 @@ struct KandongEval {
                 "| Learn fidelity | \(rate("learn", KandongEval.learnChecks.count)) |",
                 "| Reverse | \(rate("reverse", KandongEval.reverseChecks.count)) |",
                 "| Explain | \(rate("explain", KandongEval.explainChecks.count)) |",
-                "| JSON parsed | \(structured.count(where: { $0.error == nil }))/\(structured.count) (bad JSON \(structured.count(where: \.badJSON))) |",
+                "| Learn/Reverse Lookups that finished | \(structured.count(where: { $0.error == nil }))/\(structured.count) (failed on bad JSON \(structured.count(where: \.badJSON))) |",
                 "| Latency | median \(KandongEval.format(KandongEval.percentile(seconds, 0.5))), p90 \(KandongEval.format(KandongEval.percentile(seconds, 0.9))), total \(KandongEval.format(seconds.reduce(0, +))) over \(calls.count) calls |",
             ]
             for kind in ["learn", "reverse", "explain"] {
@@ -256,7 +258,7 @@ struct KandongEval {
     }
 
     struct TimedOut: LocalizedError {
-        var errorDescription: String? { "timed out after \(Int(KandongEval.timeout))s" }
+        var errorDescription: String? { "timed out after \(KandongEval.format(KandongEval.timeout))" }
     }
 
     static func withTimeout<T: Sendable>(_ body: @escaping @Sendable () async throws -> T) async throws -> T {
@@ -274,8 +276,23 @@ struct KandongEval {
     // MARK: Scoring
 
     static func missing(_ check: Check, in text: String) -> [String] {
-        check.keep.filter { !text.contains($0) }.map { "missing \($0)" }
+        check.keep.filter { !containsToken($0, in: text) }.map { "missing \($0)" }
             + check.anyOf.filter { group in !group.contains { text.localizedCaseInsensitiveContains($0) } }.map { "none of \($0)" }
+    }
+
+    /// Whether `token` appears without ASCII letters or digits running on from either end, so a changed
+    /// `@Lily2`, `#CET60`, `2999` or a longer URL doesn't count as keeping `@Lily`, `#CET6`, `299` or the URL.
+    static func containsToken(_ token: String, in text: String) -> Bool {
+        let runsOn: (Character?) -> Bool = { $0.map { $0.isASCII && ($0.isLetter || $0.isNumber) } ?? false }
+        var searchStart = text.startIndex
+        while let range = text.range(of: token, range: searchStart..<text.endIndex) {
+            let before = range.lowerBound > text.startIndex ? text[text.index(before: range.lowerBound)] : nil
+            let after = range.upperBound < text.endIndex ? text[range.upperBound] : nil
+            let startsWithWord = token.first.map(runsOn) ?? false, endsWithWord = token.last.map(runsOn) ?? false
+            if !(startsWithWord && runsOn(before)) && !(endsWithWord && runsOn(after)) { return true }
+            searchStart = text.index(after: range.lowerBound)
+        }
+        return false
     }
 
     /// More than a third of the letters are Han: the model answered in Chinese.
@@ -316,4 +333,20 @@ private struct CorrectingReadings: AIBackend {
     var correctsReadings: Bool { true }
     func supportsImages() async -> Bool { await base.supportsImages() }
     func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> { base.respond(to: request) }
+}
+
+/// The eval's scoring, checked offline.
+struct KandongEvalScoringTests {
+    @Test func keptTokensMustNotRunOn() {
+        #expect(KandongEval.containsToken("#CET6", in: "#CET6: 30 days left."))
+        #expect(!KandongEval.containsToken("#CET6", in: "#CET60: 300 days left."))
+        #expect(!KandongEval.containsToken("30", in: "300 days"))
+        #expect(KandongEval.containsToken("30", in: "300 days, 30 left"))
+        #expect(!KandongEval.containsToken("@Lily", in: "@Lily2 look"))
+        #expect(KandongEval.containsToken("@Lily", in: "Hey @Lily, look"))
+        #expect(!KandongEval.containsToken("https://xhslink.com/a/Ab3dE", in: "https://xhslink.com/a/Ab3dEvil"))
+        #expect(KandongEval.containsToken("https://xhslink.com/a/Ab3dE", in: "(https://xhslink.com/a/Ab3dE)."))
+        #expect(KandongEval.containsToken("微信", in: "发到微信群"))
+        #expect(!KandongEval.containsToken("299", in: "2999 yuan"))
+    }
 }
