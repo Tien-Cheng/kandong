@@ -147,14 +147,55 @@ struct CorrectionTests {
 
     @Test func freshInstallsUseAppleIntelligence() throws {
         let settings = try JSONDecoder().decode(AppSettings.self, from: Data("{}".utf8))
-        #expect(settings.defaultBackend == .appleIntelligence)
-        #expect(settings.localBackend == .appleIntelligence)
+        #expect(settings.defaultBackendID == "apple-intelligence")
+        #expect(settings.localBackendID == "apple-intelligence")
+        #expect(settings.backends.map(\.id) == ["apple-intelligence", "codex", "lmstudio"])
     }
 
     @Test func keepsExistingBackendChoices() throws {
         let settings = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"defaultBackend": "codex", "localBackend": "lmStudio"}"#.utf8))
-        #expect(settings.defaultBackend == .codex)
-        #expect(settings.localBackend == .lmStudio)
+        #expect(settings.defaultBackendID == "codex")
+        #expect(settings.localBackendID == "lmstudio")
+    }
+
+    @Test func turnsLegacyEndpointsIntoBackends() throws {
+        let legacy = #"{"defaultBackend": "custom", "localBackend": "custom", "lmStudio": {"baseURL": "http://localhost:1234/v1", "model": "qwen3", "vision": "auto"}, "custom": {"baseURL": "http://localhost:11434/v1", "model": "gemma", "vision": "no"}}"#
+        let settings = try JSONDecoder().decode(AppSettings.self, from: Data(legacy.utf8))
+        #expect(settings.backends.map(\.id) == ["apple-intelligence", "codex", "lmstudio", "custom"])
+        #expect(settings.backend(id: "lmstudio")?.openAI?.model == "qwen3")
+        let custom = try #require(settings.backend(id: "custom"))
+        #expect(custom.preset == .ollama)
+        #expect(custom.name == "Ollama")
+        #expect(custom.openAI?.vision == VisionSupport.no)
+        #expect(settings.defaultBackendID == "custom")
+        #expect(settings.localBackendID == "custom")
+        #expect(legacyKeychainAccounts.first?.to == custom.keychainAccount)
+        // Once saved in the new shape, it reads back the same.
+        #expect(try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings)) == settings)
+    }
+
+    @Test func localBackendMustStayOnThisMac() throws {
+        let legacy = #"{"localBackend": "custom", "custom": {"baseURL": "https://api.example.com/v1"}}"#
+        let settings = try JSONDecoder().decode(AppSettings.self, from: Data(legacy.utf8))
+        #expect(settings.localBackendID == "apple-intelligence")
+        #expect(!settings.localCandidates.contains { $0.id == "custom" })
+    }
+
+    @Test func removingTheDefaultFallsBackToAppleIntelligence() {
+        var settings = AppSettings()
+        let added = BackendConfig.openAI(.openRouter)
+        settings.backends.append(added)
+        settings.defaultBackendID = added.id
+        settings.removeBackend(id: added.id)
+        settings.removeBackend(id: "codex")
+        #expect(settings.defaultBackendID == "apple-intelligence")
+        #expect(settings.backends.map(\.id) == ["apple-intelligence", "codex", "lmstudio"], "built-ins can't be removed")
+    }
+
+    @Test func keepsBuiltInsInAnEditedFile() throws {
+        let settings = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"backends": [], "defaultBackendID": "gone"}"#.utf8))
+        #expect(settings.backends.map(\.id) == ["apple-intelligence", "codex"])
+        #expect(settings.defaultBackendID == "apple-intelligence")
     }
 
     @Test func roundTrips() throws {
@@ -240,6 +281,23 @@ struct LiveCodexTests {
     }
 }
 
+@Suite struct PartialJSONTests {
+    @Test func readsAStringStillBeingWritten() {
+        #expect(PartialJSON.stringValue(of: "translation", in: #"{"translation": "Chinese class at"#) == "Chinese class at")
+        #expect(PartialJSON.stringValue(of: "translation", in: #"{"readingCorrections": [], "translation" : "Done"}"#) == "Done")
+        #expect(PartialJSON.stringValue(of: "translation", in: #"{"transl"#) == nil)
+        #expect(PartialJSON.stringValue(of: "translation", in: #"{"translation": "#) == nil)
+    }
+
+    @Test func decodesEscapesAndStopsBeforeAHalfWrittenOne() {
+        #expect(PartialJSON.stringValue(of: "t", in: #"{"t": "a\"b\nc\\d"#) == "a\"b\nc\\d")
+        #expect(PartialJSON.stringValue(of: "t", in: #"{"t": "caf\u00e9 \ud83d\ude00!"}"#) == "café 😀!")
+        #expect(PartialJSON.stringValue(of: "t", in: #"{"t": "ok\u00"#) == "ok")
+        #expect(PartialJSON.stringValue(of: "t", in: #"{"t": "ok\ud83d"#) == "ok")
+        #expect(PartialJSON.stringValue(of: "t", in: #"{"t": "ok\"#) == "ok")
+    }
+}
+
 @Suite struct ContextOverflowTests {
     @Test func recognisesServersOverflowMessages() {
         let overflows = [
@@ -278,17 +336,15 @@ struct LiveCodexTests {
         defer { server.terminate() }
         let models = try await LMStudio.models(baseURL: base)
         #expect(models.map(\.id) == ["fake-vlm"], "embedding models are hidden")
-        let backend = OpenAICompatibleBackend(kind: .lmStudio, settings: OpenAISettings(baseURL: base))
+        let backend = OpenAICompatibleBackend(config: Self.config(.lmStudio, base))
         #expect(await backend.supportsImages())
-        var noVision = OpenAISettings(baseURL: base)
-        noVision.vision = .no
-        #expect(await !OpenAICompatibleBackend(kind: .lmStudio, settings: noVision).supportsImages())
+        #expect(await !OpenAICompatibleBackend(config: Self.config(.lmStudio, base, vision: .no)).supportsImages())
     }
 
     @Test func streamsLearnReplyStrippingThinking() async throws {
         let (server, base) = try await startServer()
         defer { server.terminate() }
-        let backend = OpenAICompatibleBackend(kind: .lmStudio, settings: OpenAISettings(baseURL: base))
+        let backend = OpenAICompatibleBackend(config: Self.config(.lmStudio, base))
         let reply = try await backend.complete(AIRequest(system: "readingCorrections", user: "今天", schema: Prompts.learnSchema))
         #expect(try Prompts.parseLearn(reply).translation == "[local] Chinese class at three this afternoon")
     }
@@ -296,7 +352,7 @@ struct LiveCodexTests {
     @Test func retriesWithoutSchemaWhenRejected() async throws {
         let (server, base) = try await startServer(rejectSchema: true)
         defer { server.terminate() }
-        let backend = OpenAICompatibleBackend(kind: .custom, settings: OpenAISettings(baseURL: base))
+        let backend = OpenAICompatibleBackend(config: Self.config(.other, base))
         let reply = try await backend.complete(AIRequest(system: "readingCorrections", user: "今天", schema: Prompts.learnSchema))
         #expect(try Prompts.parseLearn(reply).translation.hasPrefix("[local]"))
     }
@@ -304,7 +360,7 @@ struct LiveCodexTests {
     @Test func sendsImagesAsDataURLs() async throws {
         let (server, base) = try await startServer()
         defer { server.terminate() }
-        let backend = OpenAICompatibleBackend(kind: .lmStudio, settings: OpenAISettings(baseURL: base))
+        let backend = OpenAICompatibleBackend(config: Self.config(.lmStudio, base))
         let text = try await backend.complete(Prompts.transcribe(image: Data([0x89, 0x50, 0x4E, 0x47])))
         #expect(text == "今天下午三点上中文课")
         let (data, _) = try await URLSession.shared.data(from: URL(string: base.replacingOccurrences(of: "/v1", with: "/log"))!)
@@ -312,8 +368,27 @@ struct LiveCodexTests {
     }
 
     @Test func reportsUnreachableServer() async {
-        let backend = OpenAICompatibleBackend(kind: .lmStudio, settings: OpenAISettings(baseURL: "http://127.0.0.1:9/v1"))
+        let backend = OpenAICompatibleBackend(config: Self.config(.lmStudio, "http://127.0.0.1:9/v1"))
         await #expect(throws: BackendError.self) { _ = try await backend.complete(AIRequest(system: "", user: "x")) }
+    }
+
+    static func config(_ preset: OpenAIPreset, _ base: String, vision: VisionSupport = .auto) -> BackendConfig {
+        var config = BackendConfig.openAI(preset)
+        config.openAI = OpenAISettings(baseURL: base)
+        config.openAI?.vision = vision
+        return config
+    }
+
+    @Test func reportsWhatEachBackendNeeds() async throws {
+        let down = OpenAICompatibleBackend(config: Self.config(.lmStudio, "http://127.0.0.1:9/v1"))
+        #expect(await down.status() == .needsSetup("LM Studio's server isn't running.", fix: .openApp(bundleID: LMStudio.bundleID, label: "Open LM Studio")))
+        let noKey = OpenAICompatibleBackend(config: Self.config(.openRouter, "http://127.0.0.1:9/v1"))
+        #expect(await noKey.status() == .needsSetup("Add your OpenRouter API key."))
+
+        let (server, base) = try await startServer()
+        defer { server.terminate() }
+        let status = await OpenAICompatibleBackend(config: Self.config(.lmStudio, base)).status()
+        #expect(status == .ready("On this Mac · fake-vlm"))
     }
 }
 

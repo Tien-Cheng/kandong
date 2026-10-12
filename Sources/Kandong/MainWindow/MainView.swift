@@ -1,8 +1,30 @@
 import SwiftUI
 import KandongKit
 
-enum MainTab: String, Hashable {
-    case history, vocabulary, terms, settings
+enum MainTab: String, Hashable, CaseIterable, Identifiable {
+    case history, vocabulary, terms, ai, settings
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .history: "History"
+        case .vocabulary: "Vocabulary"
+        case .terms: "Terms"
+        case .ai: "AI"
+        case .settings: "Settings"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .history: "clock"
+        case .vocabulary: "star"
+        case .terms: "character.book.closed"
+        case .ai: "sparkles"
+        case .settings: "gearshape"
+        }
+    }
 }
 
 @MainActor
@@ -16,22 +38,24 @@ struct MainView: View {
     @Bindable var state: MainWindowState
 
     var body: some View {
-        TabView(selection: $state.tab) {
-            HistoryView(model: model)
-                .tabItem { Label("History", systemImage: "clock") }
-                .tag(MainTab.history)
-            VocabularyView(model: model)
-                .tabItem { Label("Vocabulary", systemImage: "star") }
-                .tag(MainTab.vocabulary)
-            TermsView(model: model)
-                .tabItem { Label("Terms", systemImage: "character.book.closed") }
-                .tag(MainTab.terms)
-            SettingsView(model: model)
-                .tabItem { Label("Settings", systemImage: "gearshape") }
-                .tag(MainTab.settings)
+        NavigationSplitView {
+            List(MainTab.allCases, selection: Binding(get: { state.tab }, set: { if let tab = $0 { state.tab = tab } })) { tab in
+                Label(tab.title, systemImage: tab.icon).tag(tab)
+            }
+            .navigationSplitViewColumnWidth(min: 150, ideal: 170, max: 220)
+        } detail: {
+            Group {
+                switch state.tab {
+                case .history: HistoryView(model: model).padding(12)
+                case .vocabulary: VocabularyView(model: model).padding(12)
+                case .terms: TermsView(model: model).padding(12)
+                case .ai: AIBackendsView(model: model)
+                case .settings: SettingsView(model: model)
+                }
+            }
+            .navigationTitle(state.tab.title)
         }
-        .padding(12)
-        .frame(minWidth: 720, minHeight: 500)
+        .frame(minWidth: 760, minHeight: 520)
     }
 }
 
@@ -50,7 +74,7 @@ private struct HistoryView: View {
             }
             if entries.isEmpty {
                 ContentUnavailableView("No lookups yet", systemImage: "text.magnifyingglass",
-                                       description: Text("Highlight Chinese anywhere and tap right ⌘, or press ⌃⌥L."))
+                                       description: Text(model.lookupHint))
             } else {
                 List(entries) { entry in
                     HStack(alignment: .top, spacing: 10) {
@@ -69,7 +93,11 @@ private struct HistoryView: View {
                     }
                     .padding(.vertical, 2)
                     .contextMenu {
-                        Button("Look up with Local backend") { model.lookup(text: entry.text, source: entry.source, local: true) }
+                        Menu("Look up with") {
+                            ForEach(model.settings.backends) { config in
+                                Button(config.name) { model.lookup(text: entry.text, source: entry.source, config: config) }
+                            }
+                        }
                         Button("Copy") {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString(entry.text, forType: .string)
@@ -105,18 +133,25 @@ private struct HistoryView: View {
 private struct VocabularyView: View {
     let model: AppModel
     @ViewState private var selection: Set<String> = []
+    @ViewState private var search = ""
 
     var body: some View {
         let _ = model.workspaceRevision
-        let items = model.workspace.vocabulary()
+        let all = model.workspace.vocabulary()
+        // Diacritic-insensitive, so "hao" finds hǎo.
+        let items = search.isEmpty ? all : all.filter { item in
+            [item.simplified, item.traditional, item.pinyin, item.gloss].contains {
+                $0.range(of: search, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+            }
+        }
         let encounters = model.encounterCounts()
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("\(items.count) words in `vocabulary.csv` — import it into Anki with File → Import.")
-                    .font(.callout).foregroundStyle(.secondary)
-                Spacer()
+                TextField("Search words, pinyin or meaning", text: $search).textFieldStyle(.roundedBorder)
                 Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([model.workspace.vocabularyURL]) }
             }
+            Text("\(all.count) words in `vocabulary.csv` — import it into Anki with File → Import. Double-click a word to look up the sentence it came from.")
+                .font(.callout).foregroundStyle(.secondary)
             Table(items, selection: $selection) {
                 TableColumn("Word") { item in
                     VStack(alignment: .leading) {
@@ -134,14 +169,22 @@ private struct VocabularyView: View {
             }
             .contextMenu(forSelectionType: String.self) { ids in
                 Button("Say") { ids.first.map(Speech.speak) }
+                Button("Look Up Sentence") { lookUpSentence(of: ids.first, in: items) }
                 Button("Remove from Vocabulary", role: .destructive) {
                     for id in ids { try? model.workspace.removeFromVocabulary(id) }
                     model.workspaceDidChange()
                 }
             } primaryAction: { ids in
-                ids.first.map(Speech.speak)
+                lookUpSentence(of: ids.first, in: items)
             }
         }
+    }
+}
+
+extension VocabularyView {
+    private func lookUpSentence(of id: String?, in items: [VocabularyItem]) {
+        guard let item = items.first(where: { $0.id == id }) else { return }
+        model.lookup(text: item.sourceSentence.isEmpty ? item.simplified : item.sourceSentence, source: .clipboard, local: false)
     }
 }
 
@@ -151,7 +194,9 @@ private struct TermsView: View {
     let model: AppModel
     @ViewState private var terms: [EditableTerm] = []
     @ViewState private var selection: Set<UUID> = []
+    /// Edits not yet written; saved half a second after the last keystroke.
     @ViewState private var dirty = false
+    @ViewState private var pendingSave: Task<Void, Never>?
 
     struct EditableTerm: Identifiable, Hashable {
         let id = UUID()
@@ -162,7 +207,7 @@ private struct TermsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Terms fix how expressions are translated — names, slang, set phrases. They live in `terms.csv`, so you or an AI agent can edit it too.")
+            Text("Terms fix how expressions are translated — names, slang, set phrases. Changes save as you type to `terms.csv`, which you or an AI agent can also edit.")
                 .font(.callout).foregroundStyle(.secondary)
             Table($terms, selection: $selection) {
                 TableColumn("Chinese") { $term in TextField("中文", text: $term.chinese).onSubmit(save) }
@@ -170,7 +215,7 @@ private struct TermsView: View {
                 TableColumn("English") { $term in TextField("English", text: $term.english).onSubmit(save) }
                 TableColumn("Note") { $term in TextField("Note", text: $term.note).onSubmit(save) }
             }
-            .onChange(of: terms) { dirty = true }
+            .onChange(of: terms) { _, _ in scheduleSave() }
             HStack {
                 Button { terms.append(EditableTerm(chinese: "", english: "", note: "")) } label: { Image(systemName: "plus") }
                 Button {
@@ -181,7 +226,6 @@ private struct TermsView: View {
                 Spacer()
                 Button("Open in Editor") { NSWorkspace.shared.open(model.workspace.termsURL) }
                 Button("Open context.md") { NSWorkspace.shared.open(model.workspace.contextURL) }
-                Button("Save", action: save).keyboardShortcut("s").disabled(!dirty)
             }
         }
         .onAppear(perform: reload)
@@ -194,10 +238,27 @@ private struct TermsView: View {
         dirty = false
     }
 
-    private func save() {
-        let cleaned = terms
+    private var cleaned: [Term] {
+        terms
             .map { Term(chinese: $0.chinese.trimmingCharacters(in: .whitespaces), english: $0.english.trimmingCharacters(in: .whitespaces), note: $0.note) }
             .filter { !$0.chinese.isEmpty }
+    }
+
+    /// Saves shortly after the last edit; a table that matches the file (e.g. just reloaded) isn't written.
+    private func scheduleSave() {
+        pendingSave?.cancel()
+        guard cleaned != model.workspace.terms() else { return dirty = false }
+        dirty = true
+        pendingSave?.cancel()
+        pendingSave = Task {
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled else { return }
+            save()
+        }
+    }
+
+    private func save() {
+        pendingSave?.cancel()
         try? model.workspace.saveTerms(cleaned)
         dirty = false
         model.workspaceDidChange()

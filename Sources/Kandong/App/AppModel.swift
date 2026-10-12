@@ -9,7 +9,6 @@ let lookupLog = Logger(subsystem: "com.tiencheng.kandong", category: "lookup")
 @MainActor
 @Observable
 final class AppModel {
-    static let customKeyAccount = "custom-api-key"
 
     var settings: AppSettings {
         didSet {
@@ -26,6 +25,8 @@ final class AppModel {
     private(set) var dictionaryError: String?
     let history: HistoryStore
     var session: LookupSession?
+    /// Last known readiness of each Backend, by id.
+    private(set) var statuses: [String: BackendStatus] = [:]
 
     @ObservationIgnored private var analyzerTask: Task<OfflineAnalyzer?, Never>?
     @ObservationIgnored private var hotkeys: HotkeyCenter!
@@ -38,6 +39,7 @@ final class AppModel {
         workspace = Workspace(path: (stored ?? AppSettings()).workspacePath)
         history = (try? HistoryStore(url: HistoryStore.defaultURL)) ?? (try! HistoryStore.inMemory())
 
+        Self.moveLegacyKeychainAccounts()
         hotkeys = HotkeyCenter { [weak self] action, local in self?.perform(action, local: local) }
         tapMonitor = ModifierTapMonitor { [weak self] local in self?.perform(.lookupSelection, local: local) }
         applySettings(previous: nil)
@@ -118,37 +120,80 @@ final class AppModel {
 
     // MARK: Backends
 
-    func backend(local: Bool) -> AIBackend {
-        backend(for: local ? settings.localBackend : settings.defaultBackend)
-    }
-
-    func backend(for kind: BackendKind) -> AIBackend {
-        switch kind {
+    func backend(for config: BackendConfig) -> AIBackend {
+        switch config.type {
         case .appleIntelligence: AppleIntelligenceBackend()
         case .codex: CodexBackend(settings: settings.codex)
-        case .lmStudio: OpenAICompatibleBackend(kind: .lmStudio, settings: settings.lmStudio)
-        case .custom: OpenAICompatibleBackend(kind: .custom, settings: settings.custom, apiKey: Keychain.read(Self.customKeyAccount))
+        case .openAICompatible: OpenAICompatibleBackend(config: config, apiKey: Keychain.read(config.keychainAccount))
         }
     }
 
-    /// Whether text sent to this Backend stays on this Mac.
-    func isOnDevice(_ kind: BackendKind) -> Bool {
-        if kind == .appleIntelligence { return true }
-        guard let settings = settings.openAISettings(for: kind), let host = URL(string: settings.baseURL)?.host else { return false }
-        return ["localhost", "127.0.0.1", "::1", "[::1]"].contains(host)
+    /// Checks every Backend (or one) and remembers whether it can answer.
+    func refreshStatuses(only id: String? = nil) async {
+        let configs = settings.backends.filter { id == nil || $0.id == id }
+        await withTaskGroup(of: (String, BackendStatus).self) { group in
+            for config in configs {
+                let backend = backend(for: config)
+                group.addTask { (config.id, await backend.status()) }
+            }
+            for await (id, status) in group { statuses[id] = status }
+        }
+    }
+
+    func addBackend(_ preset: OpenAIPreset) -> BackendConfig {
+        let config = BackendConfig.openAI(preset)
+        settings.backends.append(config)
+        return config
+    }
+
+    func removeBackend(_ config: BackendConfig) {
+        Keychain.write("", for: config.keychainAccount)
+        settings.removeBackend(id: config.id)
+        statuses[config.id] = nil
+    }
+
+    /// Does what a Backend's status suggests to make it ready.
+    func perform(_ fix: FixAction) {
+        switch fix {
+        case .openURL(let url, _):
+            NSWorkspace.shared.open(url)
+        case .copyCommand(let command, _):
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(command, forType: .string)
+            if let terminal = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal") {
+                NSWorkspace.shared.openApplication(at: terminal, configuration: NSWorkspace.OpenConfiguration())
+            }
+        case .openApp(let bundleID, _):
+            if let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+                NSWorkspace.shared.openApplication(at: app, configuration: NSWorkspace.OpenConfiguration())
+            }
+        }
+        Task {
+            try? await Task.sleep(for: .seconds(3))
+            await refreshStatuses()
+        }
+    }
+
+    private static func moveLegacyKeychainAccounts() {
+        for (old, new) in legacyKeychainAccounts {
+            guard Keychain.read(new) == nil, let key = Keychain.read(old) else { continue }
+            Keychain.write(key, for: new)
+            Keychain.write("", for: old)
+        }
     }
 
     // MARK: Lookups
 
     func perform(_ action: HotkeyAction, local: Bool) {
+        let config = settings.backend(local: local)
         switch action {
-        case .lookupSelection: lookupSelection(local: local)
-        case .captureScreen: captureScreen(local: local)
-        case .lookupClipboard: lookupClipboard(local: local)
+        case .lookupSelection: lookupSelection(config: config)
+        case .captureScreen: captureScreen(config: config)
+        case .lookupClipboard: lookupClipboard(config: config)
         }
     }
 
-    func lookupSelection(local: Bool) {
+    private func lookupSelection(config: BackendConfig) {
         Task {
             let anchor = NSEvent.mouseLocation
             guard Permissions.accessibilityGranted else {
@@ -160,50 +205,49 @@ final class AppModel {
                 showMessage("No selection — highlight some text first.", source: .selection, anchor: anchor)
                 return
             }
-            lookup(text: selection.text, source: .selection, local: local, anchor: selection.bounds ?? CGRect(origin: anchor, size: .zero))
+            lookup(text: selection.text, source: .selection, config: config, anchor: selection.bounds ?? CGRect(origin: anchor, size: .zero))
         }
     }
 
-    func captureScreen(local: Bool) {
+    private func captureScreen(config: BackendConfig) {
         Task {
             guard let image = await ScreenCapture.captureRegion() else { return }
-            lookup(image: image, source: .screenCapture, local: local, anchor: CGRect(origin: NSEvent.mouseLocation, size: .zero))
+            lookup(image: image, source: .screenCapture, config: config, anchor: CGRect(origin: NSEvent.mouseLocation, size: .zero))
         }
     }
 
-    func lookupClipboard(local: Bool) {
+    private func lookupClipboard(config: BackendConfig) {
         let anchor = CGRect(origin: NSEvent.mouseLocation, size: .zero)
         switch ClipboardReader.read() {
-        case .image(let data): lookup(image: data, source: .clipboard, local: local, anchor: anchor)
-        case .text(let text): lookup(text: text, source: .clipboard, local: local, anchor: anchor)
+        case .image(let data): lookup(image: data, source: .clipboard, config: config, anchor: anchor)
+        case .text(let text): lookup(text: text, source: .clipboard, config: config, anchor: anchor)
         case nil: showMessage("The clipboard has no text or image.", source: .clipboard, anchor: anchor.origin)
         }
     }
 
-    private func startSession(source: LookupSource, local: Bool) -> LookupSession {
+    private func startSession(source: LookupSource, config: BackendConfig) -> LookupSession {
         session?.cancel()
         let session = LookupSession(source: source)
-        let kind = local ? settings.localBackend : settings.defaultBackend
-        if kind == .appleIntelligence { AppleIntelligenceBackend.prewarm() }
-        session.backendLabel = backend(for: kind).label
-        session.backendIsLocal = isOnDevice(kind)
-        session.usesLocalBackend = local
+        if config.type == .appleIntelligence { AppleIntelligenceBackend.prewarm() }
+        session.backendID = config.id
+        session.backendLabel = backend(for: config).label
+        session.backendIsLocal = config.isOnDevice
         self.session = session
         return session
     }
 
     private func showMessage(_ message: String, source: LookupSource, anchor: CGPoint) {
-        let session = startSession(source: source, local: false)
+        let session = startSession(source: source, config: settings.backend(local: false))
         session.message = message
         session.status = .done
         panel.show(near: CGRect(origin: anchor, size: .zero))
     }
 
-    func lookup(image: Data, source: LookupSource, local: Bool, anchor: CGRect) {
-        let session = startSession(source: source, local: local)
+    private func lookup(image: Data, source: LookupSource, config: BackendConfig, anchor: CGRect) {
+        let session = startSession(source: source, config: config)
         session.status = .readingImage
         panel.show(near: anchor)
-        let backend = backend(local: local)
+        let backend = backend(for: config)
         session.tasks.append(Task {
             let png = ImageData.normalized(image)
             // On-device OCR runs alongside as the fallback and as a check on the model's reading order.
@@ -227,7 +271,7 @@ final class AppModel {
                 session.status = .done
                 return
             }
-            run(session, text: text, local: local)
+            run(session, text: text, config: config)
         })
     }
 
@@ -255,18 +299,33 @@ final class AppModel {
     }
 
     func lookup(text: String, source: LookupSource, local: Bool, anchor: CGRect? = nil) {
-        let session = startSession(source: source, local: local)
-        if let anchor { panel.show(near: anchor) } else { panel.show(near: nil) }
-        run(session, text: text, local: local)
+        lookup(text: text, source: source, config: settings.backend(local: local), anchor: anchor)
     }
 
-    private func run(_ session: LookupSession, text rawText: String, local: Bool) {
+    func lookup(text: String, source: LookupSource, config: BackendConfig, anchor: CGRect? = nil) {
+        let session = startSession(source: source, config: config)
+        if let anchor { panel.show(near: anchor) } else { panel.show(near: nil) }
+        run(session, text: text, config: config)
+    }
+
+    /// Looks the same text up again with another Backend, once; settings stay as they are.
+    func retry(_ session: LookupSession, with config: BackendConfig) {
+        if case .failed = session.status {
+            lookup(text: session.sourceText, source: session.source, config: config)
+        } else if session.explanationError != nil {
+            explain(session, with: config)
+        } else {
+            lookup(text: session.sourceText, source: session.source, config: config)
+        }
+    }
+
+    private func run(_ session: LookupSession, text rawText: String, config: BackendConfig) {
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         session.sourceText = text
         session.direction = Direction.of(text)
         session.status = .translating
         session.historyID = history.record(source: session.source, direction: session.direction, text: text)
-        let backend = backend(local: local)
+        let backend = backend(for: config)
 
         session.tasks.append(Task {
             guard let engine = await readyEngine() else {
@@ -287,10 +346,12 @@ final class AppModel {
                     session.translation = translation
                     session.status = .done
                     if let id = session.historyID { history.setTranslation(id: id, translation: translation, backend: backend.label) }
-                    if settings.alwaysExplain { explain(session, local: local) }
+                    if settings.alwaysExplain { explain(session) }
                 } catch {
                     guard !Task.isCancelled else { return }
+                    session.progress = nil
                     session.status = .failed(error.localizedDescription)
+                    Task { await refreshStatuses(only: config.id) }
                 }
             } else {
                 do {
@@ -306,16 +367,18 @@ final class AppModel {
                     if let id = session.historyID { history.setTranslation(id: id, translation: reply.chinese, backend: backend.label) }
                 } catch {
                     guard !Task.isCancelled else { return }
+                    session.progress = nil
                     session.status = .failed(error.localizedDescription)
+                    Task { await refreshStatuses(only: config.id) }
                 }
             }
         })
     }
 
     /// Explains the text, or for a text too long for the Backend, its next part.
-    func explain(_ session: LookupSession, local: Bool? = nil) {
+    func explain(_ session: LookupSession, with config: BackendConfig? = nil) {
         guard !session.isExplaining, let engine else { return }
-        let backend = backend(local: local ?? session.usesLocalBackend)
+        let backend = backend(for: config ?? settings.backend(id: session.backendID) ?? settings.backend(local: false))
         session.isExplaining = true
         session.explanationError = nil
         let translation = session.direction == .learn ? session.translation : session.sourceText
@@ -354,6 +417,14 @@ final class AppModel {
                 }
             }
         })
+    }
+
+    /// "Highlight Chinese anywhere and tap right ⌘, or press ⌃⌥L.", from the user's own shortcuts.
+    var lookupHint: String {
+        var ways: [String] = []
+        if settings.tapKey != .off { ways.append("tap \(settings.tapKey.displayName.lowercased())") }
+        if let combo = settings.hotkeys[.lookupSelection] { ways.append("press \(combo.displayString)") }
+        return ways.isEmpty ? "Highlight Chinese anywhere and use the menu bar icon." : "Highlight Chinese anywhere and " + ways.joined(separator: ", or ") + "."
     }
 
     // MARK: Learning

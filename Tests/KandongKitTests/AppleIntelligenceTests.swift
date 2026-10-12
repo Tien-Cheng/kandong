@@ -91,8 +91,13 @@ private final class FakeModel: @unchecked Sendable {
             unavailability: { nil },
             structured: { _, _, _ in
                 self.record("structured")
-                if let error = self.structuredError { throw error }
-                return #"{"translation": "Hello"}"#
+                let error = self.structuredError
+                return AsyncThrowingStream { continuation in
+                    if let error { return continuation.finish(throwing: error) }
+                    continuation.yield(#"{"translation": "Hel"}"#)
+                    continuation.yield(#"{"translation": "Hello"}"#)
+                    continuation.finish()
+                }
             },
             snapshots: { _, _ in
                 self.record("snapshots")
@@ -123,6 +128,12 @@ private final class FakeModel: @unchecked Sendable {
         let reply = try await AppleIntelligenceBackend(client: model.client).complete(learn)
         #expect(reply == #"{"translation": "Hello"}"#)
         #expect(model.log == ["structured"])
+    }
+
+    @Test func streamsStructuredSnapshots() async throws {
+        var snapshots: [String] = []
+        for try await snapshot in AppleIntelligenceBackend(client: FakeModel().client).snapshots(of: learn) { snapshots.append(snapshot) }
+        #expect(snapshots == [#"{"translation": "Hel"}"#, #"{"translation": "Hello"}"#])
     }
 
     @Test func retriesARefusalOnceAsPlainText() async throws {

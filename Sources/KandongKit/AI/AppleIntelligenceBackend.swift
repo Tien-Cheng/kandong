@@ -34,8 +34,8 @@ public enum AppleIntelligenceUnavailability: Equatable, Sendable {
 /// The calls into the on-device model, replaceable in tests.
 struct AppleModelClient: Sendable {
     var unavailability: @Sendable () -> AppleIntelligenceUnavailability?
-    /// One JSON object matching the schema, by guided generation (default guardrails).
-    var structured: @Sendable (_ prompt: Prompt, _ system: String, _ schema: GenerationSchema) async throws -> String
+    /// The JSON object so far, matching the schema, after each step of guided generation (default guardrails).
+    var structured: @Sendable (_ prompt: Prompt, _ system: String, _ schema: GenerationSchema) -> AsyncThrowingStream<String, Error>
     /// The plain-text reply so far, after each step of generation (permissive guardrails).
     var snapshots: @Sendable (_ prompt: Prompt, _ system: String) -> AsyncThrowingStream<String, Error>
 
@@ -44,8 +44,21 @@ struct AppleModelClient: Sendable {
     static let live = AppleModelClient(
         unavailability: { AppleIntelligenceBackend.unavailability },
         structured: { prompt, system, schema in
-            let session = LanguageModelSession(model: SystemLanguageModel.default, instructions: system)
-            return try await session.respond(to: prompt, schema: schema, options: options).content.jsonString
+            AsyncThrowingStream { continuation in
+                let task = Task {
+                    do {
+                        let session = LanguageModelSession(model: SystemLanguageModel.default, instructions: system)
+                        // Each partial snapshot is itself complete JSON, e.g. {"translation": "Chinese class at"}.
+                        for try await snapshot in session.streamResponse(to: prompt, schema: schema, options: options) {
+                            continuation.yield(snapshot.rawContent.jsonString)
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+                continuation.onTermination = { _ in task.cancel() }
+            }
         },
         snapshots: { prompt, system in
             AsyncThrowingStream { continuation in
@@ -89,8 +102,7 @@ struct SnapshotDeltas {
 
 /// Apple's on-device Foundation Model. Never uses Private Cloud Compute (see ADR 0004).
 public struct AppleIntelligenceBackend: AIBackend {
-    public let kind = BackendKind.appleIntelligence
-    public let label = BackendKind.appleIntelligence.displayName
+    public let label = BackendConfig.appleIntelligence.name
 
     /// The on-device model misses most 多音字 and sometimes "corrects" a right reading into a wrong
     /// one (see `PolyphoneEval`), so it only translates and the dictionary readings stand.
@@ -120,6 +132,16 @@ public struct AppleIntelligenceBackend: AIBackend {
         LanguageModelSession().prewarm()
     }
 
+    public func status() async -> BackendStatus {
+        switch client.unavailability() {
+        case nil: .ready("On this Mac")
+        case .deviceNotEligible: .unavailable(AppleIntelligenceUnavailability.deviceNotEligible.message)
+        case .notEnabled: .needsSetup(AppleIntelligenceUnavailability.notEnabled.message,
+                                      fix: .openURL(AppleIntelligenceUnavailability.settingsURL, label: "Open Settings"))
+        case let reason?: .needsSetup(reason.message)
+        }
+    }
+
     public func supportsImages() async -> Bool {
         Self.unavailability == nil && SystemLanguageModel.default.capabilities.contains(.vision)
     }
@@ -141,7 +163,7 @@ public struct AppleIntelligenceBackend: AIBackend {
     /// Slack for the chat template and rounding.
     static let overhead = 128
 
-    public func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> {
+    public func snapshots(of request: AIRequest) -> AsyncThrowingStream<String, Error> {
         let client = client
         return AsyncThrowingStream { continuation in
             let task = Task {
@@ -151,25 +173,48 @@ public struct AppleIntelligenceBackend: AIBackend {
                     if let schema = request.schema {
                         let generationSchema = try Self.generationSchema(from: schema)
                         do {
-                            continuation.yield(try await client.structured(prompt, request.system, generationSchema))
+                            for try await snapshot in client.structured(prompt, request.system, generationSchema) {
+                                continuation.yield(snapshot)
+                            }
                         } catch let error as LanguageModelError where Self.isRefusal(error) {
                             // Guided generation uses the default guardrails; retry once as plain text with the
-                            // permissive ones (the system prompt already asks for JSON). Take the final text
-                            // whole so the JSON is never stitched from revised snapshots.
-                            var reply = ""
-                            for try await snapshot in client.snapshots(prompt, request.system) { reply = snapshot }
-                            continuation.yield(reply)
+                            // permissive ones (the system prompt already asks for JSON). Its snapshots replace
+                            // any partial reply so far.
+                            for try await snapshot in client.snapshots(prompt, request.system) { continuation.yield(snapshot) }
                         }
                     } else {
+                        for try await snapshot in client.snapshots(prompt, request.system) { continuation.yield(snapshot) }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: Self.backendError(from: error))
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    public func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> {
+        let snapshots = snapshots(of: request)
+        let structured = request.schema != nil
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    if structured {
+                        // JSON is taken whole, so it is never stitched together from revised snapshots.
+                        var reply = ""
+                        for try await snapshot in snapshots { reply = snapshot }
+                        continuation.yield(reply)
+                    } else {
                         var deltas = SnapshotDeltas()
-                        for try await snapshot in client.snapshots(prompt, request.system) {
+                        for try await snapshot in snapshots {
                             let delta = deltas.next(snapshot)
                             if !delta.isEmpty { continuation.yield(delta) }
                         }
                     }
                     continuation.finish()
                 } catch {
-                    continuation.finish(throwing: Self.backendError(from: error))
+                    continuation.finish(throwing: error)
                 }
             }
             continuation.onTermination = { _ in task.cancel() }

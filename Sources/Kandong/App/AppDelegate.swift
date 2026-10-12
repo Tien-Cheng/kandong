@@ -52,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case "selection": model.perform(.lookupSelection, local: local)
             case "capture": model.perform(.captureScreen, local: local)
             case "settings": showMainWindow(tab: .settings)
+            case "ai": showMainWindow(tab: .ai)
             default: break
             }
         }
@@ -91,7 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(item("Capture Screen Region", .captureScreen))
         menu.addItem(item("Look Up Clipboard", .lookupClipboard))
         menu.addItem(.separator())
-        let localHeader = NSMenuItem(title: "With Local backend (\(model.settings.localBackend.displayName))", action: nil, keyEquivalent: "")
+        let localHeader = NSMenuItem(title: "With Local backend (\(model.settings.backend(local: true).name))", action: nil, keyEquivalent: "")
         localHeader.isEnabled = false
         menu.addItem(localHeader)
         menu.addItem(item("Look Up Selection", .lookupSelection, local: true))
@@ -100,6 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(menuItem("History", #selector(openHistory)))
         menu.addItem(menuItem("Vocabulary", #selector(openVocabulary)))
         menu.addItem(menuItem("Terms", #selector(openTerms)))
+        menu.addItem(menuItem("AI Backends", #selector(openAI)))
         menu.addItem(menuItem("Settings…", #selector(openSettings), key: ","))
         menu.addItem(.separator())
         if let error = model.dictionaryError {
@@ -129,6 +131,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func openHistory() { showMainWindow(tab: .history) }
     @objc private func openVocabulary() { showMainWindow(tab: .vocabulary) }
     @objc private func openTerms() { showMainWindow(tab: .terms) }
+    @objc private func openAI() { showMainWindow(tab: .ai) }
     @objc private func openSettings() { showMainWindow(tab: .settings) }
     @objc private func quit() { NSApp.terminate(nil) }
 

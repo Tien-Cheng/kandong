@@ -10,7 +10,7 @@ struct ResultView: View {
             if let session = model.session {
                 SessionView(model: model, controller: controller, session: session)
             } else {
-                Text("Highlight Chinese text and tap right ⌘.")
+                Text(model.lookupHint)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -68,7 +68,7 @@ private struct SessionView: View {
                     .buttonStyle(.borderless)
                     .help("Read aloud")
             }
-            BackendBadge(label: session.backendLabel, isLocal: session.backendIsLocal)
+            BackendBadge(model: model, session: session)
             Button { controller.togglePin() } label: {
                 Image(systemName: controller.isPinned ? "pin.fill" : "pin")
             }
@@ -103,6 +103,9 @@ private struct SessionView: View {
         }
         if let analysis = session.analysis, analysis.hasChinese {
             ReadingView(model: model, analysis: analysis, showTraditional: session.showTraditional)
+            if session.direction == .reverse, let chinese = session.translation {
+                CopyButton(text: chinese, label: "Copy Chinese")
+            }
         }
         translationSection
         if session.analysis?.hasChinese == true, session.status != .readingImage {
@@ -114,25 +117,20 @@ private struct SessionView: View {
     @ViewBuilder private var translationSection: some View {
         switch session.status {
         case .translating:
-            if let progress = session.progress {
-                if !progress.translation.isEmpty {
-                    TranslationBox(text: progress.translation)
-                }
+            // The Translation types out as it comes in (Reverse's Chinese shows once it's read).
+            if let progress = session.progress, session.direction == .learn, !progress.translation.isEmpty {
+                TranslationBox(text: progress.translation)
+            }
+            if let progress = session.progress, progress.isInParts {
                 ProgressRow(text: partProgressText(progress))
-            } else {
+            } else if session.progress?.translation.isEmpty ?? true || session.direction == .reverse {
                 ProgressRow(text: session.direction == .reverse ? "Finding the Chinese…" : "Translating…")
             }
         case .failed(let message):
-            VStack(alignment: .leading, spacing: 6) {
-                Label(message, systemImage: "exclamationmark.triangle")
-                    .foregroundStyle(.orange)
-                    .textSelection(.enabled)
-                Button("Settings…") { AppDelegate.shared?.showMainWindow(tab: .settings) }
-                    .controlSize(.small)
-            }
+            FailureCard(model: model, session: session, message: message)
         case .done, .readingImage:
             if session.direction == .learn, let translation = session.translation {
-                TranslationBox(text: translation)
+                TranslationBox(text: translation, copyable: true)
             }
             if let note = session.note {
                 Text(note).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
@@ -155,9 +153,9 @@ private struct SessionView: View {
                 } label: {
                     Label("Explain", systemImage: "graduationcap")
                 }
-                if let error = session.explanationError {
-                    Text(error).font(.caption).foregroundStyle(.orange).lineLimit(2)
-                }
+            }
+            if session.explanationError != nil {
+                FailureCard(model: model, session: session, message: session.explanationError!)
             }
         } else {
             VStack(alignment: .leading, spacing: 6) {
@@ -438,6 +436,7 @@ private struct TermEditor: View {
 
 private struct TranslationBox: View {
     let text: String
+    var copyable = false
 
     var body: some View {
         Text(text)
@@ -445,43 +444,118 @@ private struct TranslationBox: View {
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(10)
+            .padding(.trailing, copyable ? 22 : 0)
             .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(alignment: .topTrailing) {
+                if copyable { CopyButton(text: text).labelStyle(.iconOnly).padding(6) }
+            }
     }
 }
 
-private struct BackendBadge: View {
-    let label: String
-    let isLocal: Bool
-
-    var body: some View {
-        Label(label, systemImage: isLocal ? "desktopcomputer" : "cloud")
-            .font(.caption2)
-            .lineLimit(1)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(isLocal ? Color.green.opacity(0.15) : Color.blue.opacity(0.12), in: Capsule())
-            .help(isLocal ? "Text stays on this Mac" : "Text is sent to \(label)")
-    }
-}
-
-private struct Chip: View {
+private struct CopyButton: View {
     let text: String
-    let color: Color
-
-    init(_ text: String, color: Color = .gray) {
-        self.text = text
-        self.color = color
-    }
+    var label = "Copy"
+    @ViewState private var copied = false
 
     var body: some View {
-        Text(text)
-            .font(.caption2.weight(.medium))
-            .lineLimit(1)
-            .padding(.horizontal, 5)
-            .padding(.vertical, 1)
-            .background(color.opacity(0.18), in: Capsule())
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            copied = true
+            Task {
+                try? await Task.sleep(for: .seconds(1.5))
+                copied = false
+            }
+        } label: {
+            Label(copied ? "Copied" : label, systemImage: copied ? "checkmark" : "doc.on.doc")
+        }
+        .buttonStyle(.borderless)
+        .controlSize(.small)
+        .help(label)
     }
 }
+
+/// Why the AI couldn't answer, how to fix it, and which other Backends could answer instead.
+private struct FailureCard: View {
+    let model: AppModel
+    let session: LookupSession
+    let message: String
+
+    var body: some View {
+        let status = model.statuses[session.backendID]
+        let alternatives = model.settings.backends.filter { $0.id != session.backendID && model.statuses[$0.id]?.isReady == true }
+        VStack(alignment: .leading, spacing: 8) {
+            Label(status.map { $0.isReady ? message : $0.message } ?? message, systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.orange)
+                .textSelection(.enabled)
+            HStack(spacing: 6) {
+                if let fix = status?.fix {
+                    Button(fix.label) { model.perform(fix) }
+                }
+                Button("AI settings…") { AppDelegate.shared?.showMainWindow(tab: .ai) }
+            }
+            .controlSize(.small)
+            if !alternatives.isEmpty {
+                HStack(spacing: 6) {
+                    Text("Try with:").font(.caption).foregroundStyle(.secondary)
+                    ForEach(alternatives) { config in
+                        Button {
+                            model.retry(session, with: config)
+                        } label: {
+                            Label(config.name, systemImage: config.isOnDevice ? "desktopcomputer" : "cloud")
+                        }
+                        .help(config.isOnDevice ? "Text stays on this Mac" : "Text is sent to \(config.name)")
+                    }
+                }
+                .controlSize(.small)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        .task { await model.refreshStatuses() }
+    }
+}
+
+/// Which Backend answered; click to ask another one or make this one the default.
+private struct BackendBadge: View {
+    let model: AppModel
+    let session: LookupSession
+
+    var body: some View {
+        let isLocal = session.backendIsLocal
+        Menu {
+            Section("Try with") {
+                ForEach(model.settings.backends.filter { $0.id != session.backendID }) { config in
+                    Button {
+                        model.retry(session, with: config)
+                    } label: {
+                        let status = model.statuses[config.id]
+                        Text(config.name + (status.map { $0.isReady ? "" : " — \($0.message)" } ?? ""))
+                    }
+                    .disabled(model.statuses[config.id].map { !$0.isReady } ?? false)
+                }
+            }
+            if model.settings.defaultBackendID != session.backendID, let config = model.settings.backend(id: session.backendID) {
+                Button("Make \(config.name) the Default") { model.settings.defaultBackendID = config.id }
+            }
+            Button("AI Settings…") { AppDelegate.shared?.showMainWindow(tab: .ai) }
+        } label: {
+            Label(session.backendLabel, systemImage: isLocal ? "desktopcomputer" : "cloud")
+                .font(.caption2)
+                .lineLimit(1)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(isLocal ? Color.green.opacity(0.15) : Color.blue.opacity(0.12), in: Capsule())
+        .help((isLocal ? "Text stays on this Mac" : "Text is sent to \(session.backendLabel)") + " — click to try another Backend")
+        .task { if model.statuses.isEmpty { await model.refreshStatuses() } }
+    }
+}
+
 
 private struct SectionTitle: View {
     let title: String

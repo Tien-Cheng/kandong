@@ -24,11 +24,11 @@ final class LookupSession: Identifiable {
     /// Register remark for Reverse Lookups.
     var note: String?
     var status: Status = .translating
+    /// The Backend answering this Lookup.
+    var backendID = ""
     var backendLabel = ""
     /// Whether the Backend keeps text on this Mac (shown in the badge).
     var backendIsLocal = false
-    /// Whether the user asked for the Local backend (⇧).
-    var usesLocalBackend = false
     var showTraditional = false
     var historyID: Int64?
     /// Message shown instead of a Result (e.g. "No selection").

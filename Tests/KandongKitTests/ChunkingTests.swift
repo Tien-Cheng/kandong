@@ -49,7 +49,6 @@ private func fakeChinese(_ text: String) -> String { String(text.map { $0.isASCI
 
 /// "Translates" the text it was given, failing anything longer than `limit` characters of prompt.
 private final class FakeBackend: AIBackend, @unchecked Sendable {
-    let kind = BackendKind.custom
     let label = "Fake"
     let limit: Int
     let measures: Bool
@@ -86,9 +85,23 @@ private final class FakeBackend: AIBackend, @unchecked Sendable {
     }
 }
 
+/// Sends its JSON reply a few characters at a time.
+private struct TrickleBackend: AIBackend {
+    let label = "Trickle"
+    func supportsImages() async -> Bool { false }
+    func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> {
+        let reply = Array(#"{"translation": "Hello there"}"#)
+        return AsyncThrowingStream { continuation in
+            for start in stride(from: 0, to: reply.count, by: 3) {
+                continuation.yield(String(reply[start..<min(start + 3, reply.count)]))
+            }
+            continuation.finish()
+        }
+    }
+}
+
 /// Gives English back unchanged as its "Chinese".
 private struct EchoBackend: AIBackend {
-    let kind = BackendKind.custom
     let label = "Echo"
     func supportsImages() async -> Bool { false }
     func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> {
@@ -102,7 +115,6 @@ private struct EchoBackend: AIBackend {
 
 /// Copies any text longer than one sentence back untranslated; translates single sentences.
 private struct EchoOnceBackend: AIBackend {
-    let kind = BackendKind.custom
     let label = "Echo"
     func supportsImages() async -> Bool { false }
 
@@ -263,6 +275,17 @@ struct ChunkingTests {
         var url = ExplanationParts(["https://example.com"])
         split = url.splitCurrent()
         #expect(!split)
+    }
+
+    @Test func streamsTheTranslationAsItArrives() async throws {
+        let engine = try engine()
+        let events = ProgressLog()
+        let (translation, _) = try await engine.learn(engine.offline("你好。"), backend: TrickleBackend()) { await events.add($0) }
+        #expect(translation == "Hello there")
+        let shown = await events.events.map(\.translation)
+        #expect(shown.count > 2 && shown.first!.count < shown.last!.count)
+        #expect(shown.last == "Hello there")
+        #expect(await events.events.allSatisfy { !$0.isInParts })
     }
 
     @Test func keepsLineBreaksBetweenParts() {

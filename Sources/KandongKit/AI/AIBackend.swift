@@ -10,19 +10,60 @@ public struct AIRequest: Sendable {
     public var schema: JSONValue?
     /// Roughly how many characters the reply will be, so Backends with a small context can leave room for it.
     public var expectedReplyLength: Int
+    /// The JSON property worth showing while the reply is still coming in, e.g. "translation".
+    public var streamField: String?
 
-    public init(system: String, user: String, image: Data? = nil, schema: JSONValue? = nil, expectedReplyLength: Int = 500) {
+    public init(
+        system: String, user: String, image: Data? = nil, schema: JSONValue? = nil, expectedReplyLength: Int = 500, streamField: String? = nil
+    ) {
         self.system = system
         self.user = user
         self.image = image
         self.schema = schema
         self.expectedReplyLength = expectedReplyLength
+        self.streamField = streamField
     }
 }
 
-/// The AI provider answering a Lookup.
+/// One thing the user can do to make a Backend ready.
+public enum FixAction: Equatable, Sendable {
+    case openURL(URL, label: String)
+    /// A command to paste into Terminal.
+    case copyCommand(String, label: String)
+    case openApp(bundleID: String, label: String)
+
+    public var label: String {
+        switch self {
+        case .openURL(_, let label), .copyCommand(_, let label), .openApp(_, let label): label
+        }
+    }
+}
+
+/// Whether a Backend can answer right now, and if not, why.
+public enum BackendStatus: Equatable, Sendable {
+    case ready(String)
+    case needsSetup(String, fix: FixAction? = nil)
+    case unavailable(String)
+
+    public var isReady: Bool {
+        if case .ready = self { return true }
+        return false
+    }
+
+    public var message: String {
+        switch self {
+        case .ready(let message), .needsSetup(let message, _), .unavailable(let message): message
+        }
+    }
+
+    public var fix: FixAction? {
+        if case .needsSetup(_, let fix) = self { return fix }
+        return nil
+    }
+}
+
+/// The AI answering a Lookup.
 public protocol AIBackend: Sendable {
-    var kind: BackendKind { get }
     /// Short label for the panel badge, e.g. "Codex · gpt-6.1-sol".
     var label: String { get }
     func supportsImages() async -> Bool
@@ -31,14 +72,39 @@ public protocol AIBackend: Sendable {
     /// Whether the request and its reply fit in the model's context; nil when the Backend can't
     /// tell, in which case it reports `BackendError.contextTooLong` if it doesn't.
     func fits(_ request: AIRequest) async -> Bool?
+    /// Checks the Backend can answer, without sending a Lookup.
+    func status() async -> BackendStatus
     /// Streams the reply as text deltas.
     func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error>
+    /// Streams the whole reply so far after each step; the last one is the reply.
+    func snapshots(of request: AIRequest) -> AsyncThrowingStream<String, Error>
 }
 
 extension AIBackend {
     public var correctsReadings: Bool { true }
 
     public func fits(_ request: AIRequest) async -> Bool? { nil }
+
+    public func status() async -> BackendStatus { .ready("") }
+
+    public func snapshots(of request: AIRequest) -> AsyncThrowingStream<String, Error> {
+        let deltas = respond(to: request)
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    var text = ""
+                    for try await delta in deltas {
+                        text += delta
+                        continuation.yield(text)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
 
     /// The whole reply as one string.
     public func complete(_ request: AIRequest) async throws -> String {

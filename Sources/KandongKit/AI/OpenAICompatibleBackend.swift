@@ -13,6 +13,7 @@ public struct LMStudioModel: Hashable, Sendable, Identifiable {
 }
 
 public enum LMStudio {
+    public static let bundleID = "ai.elementlabs.lmstudio"
     public static let startHint = "Open LM Studio and start the local server (Developer tab, or `lms server start`)."
 
     /// Chat-capable models, loaded ones first.
@@ -47,17 +48,18 @@ public enum LMStudio {
 
 /// Any server speaking OpenAI's `/chat/completions` API: LM Studio, Ollama, hosted APIs.
 public struct OpenAICompatibleBackend: AIBackend {
-    public let kind: BackendKind
+    public let config: BackendConfig
     public let settings: OpenAISettings
     public let apiKey: String?
 
-    public init(kind: BackendKind, settings: OpenAISettings, apiKey: String? = nil) {
-        self.kind = kind
-        self.settings = settings
+    public init(config: BackendConfig, apiKey: String? = nil) {
+        self.config = config
+        self.settings = config.openAI ?? OpenAISettings(baseURL: (config.preset ?? .other).baseURL)
         self.apiKey = apiKey
     }
 
-    private var name: String { kind.displayName }
+    private var name: String { config.name }
+    private var isLMStudio: Bool { config.isLMStudio }
 
     public var label: String {
         settings.model.isEmpty ? name : "\(name) · \(settings.model)"
@@ -69,12 +71,29 @@ public struct OpenAICompatibleBackend: AIBackend {
         return url
     }
 
+    public func status() async -> BackendStatus {
+        if config.preset?.needsKey == true, apiKey?.isEmpty ?? true {
+            return .needsSetup("Add your \(config.preset?.displayName ?? name) API key.")
+        }
+        do {
+            let model = try await resolveModel()
+            return .ready(config.isOnDevice ? "On this Mac · \(model)" : model)
+        } catch BackendError.serverUnavailable {
+            if isLMStudio {
+                return .needsSetup("LM Studio's server isn't running.", fix: .openApp(bundleID: LMStudio.bundleID, label: "Open LM Studio"))
+            }
+            return .needsSetup("\(name) isn't reachable at \(settings.baseURL).")
+        } catch {
+            return .needsSetup(error.localizedDescription)
+        }
+    }
+
     public func supportsImages() async -> Bool {
         switch settings.vision {
         case .yes: return true
         case .no: return false
         case .auto:
-            guard kind == .lmStudio, let models = try? await LMStudio.models(baseURL: baseURL) else { return false }
+            guard isLMStudio, let models = try? await LMStudio.models(baseURL: baseURL) else { return false }
             let model = try? await resolveModel(lmStudioModels: models)
             return models.first { $0.id == model }?.canReadImages ?? false
         }
@@ -83,7 +102,7 @@ public struct OpenAICompatibleBackend: AIBackend {
     /// The configured model, or the first one the server offers.
     func resolveModel(lmStudioModels: [LMStudioModel]? = nil) async throws -> String {
         if !settings.model.isEmpty { return settings.model }
-        if kind == .lmStudio {
+        if isLMStudio {
             let models: [LMStudioModel]
             if let lmStudioModels { models = lmStudioModels } else { models = try await LMStudio.models(baseURL: baseURL) }
             guard let first = models.first else {
@@ -179,7 +198,7 @@ public struct OpenAICompatibleBackend: AIBackend {
         do {
             (bytes, response) = try await URLSession.shared.bytes(for: urlRequest)
         } catch {
-            let hint = kind == .lmStudio ? LMStudio.startHint : "Is the server running?"
+            let hint = isLMStudio ? LMStudio.startHint : "Is the server running?"
             throw BackendError.serverUnavailable(name: name, url: baseURL, hint: hint)
         }
         let status = (response as? HTTPURLResponse)?.statusCode ?? 200

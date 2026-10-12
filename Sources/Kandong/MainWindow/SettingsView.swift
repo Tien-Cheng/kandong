@@ -6,11 +6,6 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            backendSection
-            AppleIntelligenceSection(model: model)
-            CodexSection(model: model)
-            OpenAISection(model: model, kind: .lmStudio)
-            OpenAISection(model: model, kind: .custom)
             shortcutsSection
             learningSection
             workspaceSection
@@ -18,21 +13,6 @@ struct SettingsView: View {
             historySection
         }
         .formStyle(.grouped)
-    }
-
-    private var backendSection: some View {
-        Section {
-            Picker("Default backend", selection: $model.settings.defaultBackend) {
-                ForEach(BackendKind.allCases) { Text($0.displayName).tag($0) }
-            }
-            Picker("Local backend (hold ⇧)", selection: $model.settings.localBackend) {
-                ForEach(BackendKind.localCandidates) { Text($0.displayName).tag($0) }
-            }
-        } header: {
-            Text("AI")
-        } footer: {
-            Text("Hold ⇧ with any shortcut to send that lookup to the Local backend instead — e.g. for private messages you'd rather keep on this Mac.")
-        }
     }
 
     private var shortcutsSection: some View {
@@ -57,7 +37,7 @@ struct SettingsView: View {
     }
 
     private var learningSection: some View {
-        Section("Learning") {
+        Section {
             Picker("My level", selection: $model.settings.myLevel) {
                 Text("Off — show everything").tag(0)
                 ForEach(1...7, id: \.self) { Text(HSKTable.label(for: $0)).tag($0) }
@@ -65,6 +45,10 @@ struct SettingsView: View {
             Toggle("Pinyin only for words above my level", isOn: $model.settings.pinyinForUnknownOnly)
                 .disabled(model.settings.myLevel == 0)
             Toggle("Always explain (uses more AI quota)", isOn: $model.settings.alwaysExplain)
+        } header: {
+            Text("Learning")
+        } footer: {
+            Text("Words at or below your HSK level are folded away in the word list, so new words stand out.")
         }
     }
 
@@ -89,9 +73,13 @@ struct SettingsView: View {
     }
 
     private var historySection: some View {
-        Section("History") {
+        Section {
             Stepper("Keep history for \(model.settings.historyRetentionDays) days",
                     value: $model.settings.historyRetentionDays, in: 7...3650, step: 30)
+        } header: {
+            Text("History")
+        } footer: {
+            Text("Lookups and how often you meet saved words are kept on this Mac only.")
         }
     }
 
@@ -102,215 +90,6 @@ struct SettingsView: View {
         panel.canCreateDirectories = true
         if panel.runModal() == .OK, let url = panel.url {
             model.settings.workspacePath = (url.path as NSString).abbreviatingWithTildeInPath
-        }
-    }
-}
-
-// MARK: - Apple Intelligence
-
-private struct AppleIntelligenceSection: View {
-    @Bindable var model: AppModel
-    @ViewState private var status = ""
-    @ViewState private var testing = false
-
-    var body: some View {
-        Section {
-            LabeledContent("Status") {
-                HStack {
-                    Text(availabilityText).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled)
-                    Spacer()
-                    if let reason = AppleIntelligenceBackend.unavailability, reason != .deviceNotEligible {
-                        Button("Open Settings") { NSWorkspace.shared.open(AppleIntelligenceUnavailability.settingsURL) }
-                    }
-                    Button(testing ? "Testing…" : "Test", action: test).disabled(testing)
-                }
-            }
-        } header: {
-            Text("Apple Intelligence")
-        } footer: {
-            Text("Apple's model on this Mac: nothing to install or sign in to, and text never leaves this Mac. Needs Apple Intelligence turned on in System Settings.")
-        }
-    }
-
-    private var availabilityText: String {
-        if !status.isEmpty { return status }
-        return AppleIntelligenceBackend.unavailability?.message ?? "Ready"
-    }
-
-    private func test() {
-        testing = true
-        Task {
-            let started = Date()
-            do {
-                let reply = try await model.backend(for: .appleIntelligence).complete(AIRequest(
-                    system: "Translate to English. Reply with the translation only.", user: "你好，世界"
-                ))
-                status = "OK in \(String(format: "%.1f", Date().timeIntervalSince(started)))s: \(reply)"
-            } catch {
-                status = error.localizedDescription
-            }
-            testing = false
-        }
-    }
-}
-
-// MARK: - Codex
-
-private struct CodexSection: View {
-    @Bindable var model: AppModel
-    @ViewState private var models: [CodexModel] = []
-    @ViewState private var status = ""
-    @ViewState private var testing = false
-
-    var body: some View {
-        Section {
-            LabeledContent("Status") {
-                HStack {
-                    Text(status).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled)
-                    Spacer()
-                    Button(testing ? "Testing…" : "Test", action: test).disabled(testing)
-                }
-            }
-            Picker("Model", selection: $model.settings.codex.model) {
-                Text("Codex default").tag("")
-                ForEach(models) { Text($0.displayName + ($0.canReadImages ? "" : " (text only)")).tag($0.id) }
-                if !model.settings.codex.model.isEmpty, !models.contains(where: { $0.id == model.settings.codex.model }) {
-                    Text(model.settings.codex.model).tag(model.settings.codex.model)
-                }
-            }
-            Picker("Reasoning effort", selection: $model.settings.codex.effort) {
-                ForEach(effortOptions, id: \.self) { Text($0).tag($0) }
-            }
-            TextField("codex path", text: $model.settings.codex.executablePath, prompt: Text("Found automatically"))
-        } header: {
-            Text("Codex")
-        } footer: {
-            Text("Uses your ChatGPT subscription through the Codex CLI (`codex app-server`). Sign in with `codex login`. Lower effort answers faster.")
-        }
-        .task { await refresh() }
-    }
-
-    private var effortOptions: [String] {
-        let fromModel = models.first { $0.id == model.settings.codex.model }?.reasoningEfforts ?? []
-        let options = fromModel.isEmpty ? ["minimal", "low", "medium", "high"] : fromModel
-        return options.contains(model.settings.codex.effort) ? options : options + [model.settings.codex.effort]
-    }
-
-    private func refresh() async {
-        guard let path = CodexAppServer.locateCodex(model.settings.codex.executablePath) else {
-            status = "codex not found — `brew install codex`"
-            return
-        }
-        do {
-            models = try await CodexAppServer.shared.models(executablePath: model.settings.codex.executablePath)
-            status = "Ready · \(path.path)"
-        } catch {
-            status = error.localizedDescription
-        }
-    }
-
-    private func test() {
-        testing = true
-        Task {
-            let started = Date()
-            do {
-                let reply = try await model.backend(for: .codex).complete(AIRequest(
-                    system: "Translate to English. Reply with the translation only.", user: "你好，世界"
-                ))
-                status = "OK in \(String(format: "%.1f", Date().timeIntervalSince(started)))s: \(reply)"
-            } catch {
-                status = error.localizedDescription
-            }
-            testing = false
-        }
-    }
-}
-
-// MARK: - LM Studio / custom endpoint
-
-private struct OpenAISection: View {
-    @Bindable var model: AppModel
-    let kind: BackendKind
-    @ViewState private var lmModels: [LMStudioModel] = []
-    @ViewState private var status = ""
-    @ViewState private var apiKey = ""
-    @ViewState private var testing = false
-
-    private var settings: Binding<OpenAISettings> {
-        kind == .lmStudio ? $model.settings.lmStudio : $model.settings.custom
-    }
-
-    var body: some View {
-        Section {
-            TextField("Server URL", text: settings.baseURL)
-            if kind == .custom {
-                SecureField("API key (optional)", text: $apiKey)
-                    .onSubmit { Keychain.write(apiKey, for: AppModel.customKeyAccount) }
-                    .onChange(of: apiKey) { Keychain.write(apiKey, for: AppModel.customKeyAccount) }
-            }
-            if kind == .lmStudio && !lmModels.isEmpty {
-                Picker("Model", selection: settings.model) {
-                    Text("First loaded model").tag("")
-                    ForEach(lmModels) { item in
-                        Text(item.id + (item.canReadImages ? " · vision" : "") + (item.isLoaded ? " · loaded" : "")).tag(item.id)
-                    }
-                    if !settings.wrappedValue.model.isEmpty, !lmModels.contains(where: { $0.id == settings.wrappedValue.model }) {
-                        Text(settings.wrappedValue.model).tag(settings.wrappedValue.model)
-                    }
-                }
-            } else {
-                TextField("Model", text: settings.model, prompt: Text("First model the server lists"))
-            }
-            Picker("Reads images", selection: settings.vision) {
-                Text(kind == .lmStudio ? "Detect (vision models)" : "Auto (no)").tag(VisionSupport.auto)
-                Text("Yes").tag(VisionSupport.yes)
-                Text("No — use on-device OCR").tag(VisionSupport.no)
-            }
-            LabeledContent("Status") {
-                HStack {
-                    Text(status).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled)
-                    Spacer()
-                    if kind == .lmStudio { Button("Refresh") { Task { await refresh() } } }
-                    Button(testing ? "Testing…" : "Test", action: test).disabled(testing)
-                }
-            }
-        } header: {
-            Text(kind == .lmStudio ? "LM Studio" : "Other OpenAI-compatible server")
-        } footer: {
-            Text(kind == .lmStudio
-                 ? "Runs fully on this Mac. In LM Studio, download a model (Qwen3 handles Chinese well; pick a vision model to read screenshots) and start the server: Developer tab or `lms server start`."
-                 : "Ollama (http://localhost:11434/v1), or any hosted OpenAI-compatible API. The key is stored in your Keychain.")
-        }
-        .task {
-            if kind == .custom { apiKey = Keychain.read(AppModel.customKeyAccount) ?? "" }
-            if kind == .lmStudio { await refresh() }
-        }
-    }
-
-    private func refresh() async {
-        do {
-            lmModels = try await LMStudio.models(baseURL: settings.wrappedValue.baseURL)
-            let loaded = lmModels.filter(\.isLoaded).count
-            status = lmModels.isEmpty ? "Running, but no models downloaded." : "Running · \(lmModels.count) models (\(loaded) loaded)"
-        } catch {
-            lmModels = []
-            status = error.localizedDescription
-        }
-    }
-
-    private func test() {
-        testing = true
-        Task {
-            let started = Date()
-            do {
-                let reply = try await model.backend(for: kind).complete(AIRequest(
-                    system: "Translate to English. Reply with the translation only.", user: "你好，世界"
-                ))
-                status = "OK in \(String(format: "%.1f", Date().timeIntervalSince(started)))s: \(Prompts.visibleText(reply))"
-            } catch {
-                status = error.localizedDescription
-            }
-            testing = false
         }
     }
 }

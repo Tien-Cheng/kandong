@@ -163,18 +163,18 @@ public enum Prompts {
         if !user.isEmpty { user += "\n\n" }
         user += precedingNote(preceding) + "Text:\n\(text)"
         guard askForReadings else {
-            return AIRequest(system: translateSystem, user: user, schema: translationSchema, expectedReplyLength: replyLength(text))
+            return AIRequest(system: translateSystem, user: user, schema: translationSchema, expectedReplyLength: replyLength(text), streamField: "translation")
         }
         let readings = analysis.uniqueWords.map { "\($0.text) [\($0.pinyin)]" }.joined(separator: "\n")
         user += "\n\nDictionary pinyin:\n\(readings)"
-        return AIRequest(system: learnSystem, user: user, schema: learnSchema, expectedReplyLength: replyLength(text))
+        return AIRequest(system: learnSystem, user: user, schema: learnSchema, expectedReplyLength: replyLength(text), streamField: "translation")
     }
 
     public static func reverse(text: String, context: String, terms: [Term], preceding: String? = nil) -> AIRequest {
         var user = steering(context: context, terms: terms)
         if !user.isEmpty { user += "\n\n" }
         user += precedingNote(preceding) + "English:\n\(text)"
-        return AIRequest(system: reverseSystem, user: user, schema: reverseSchema, expectedReplyLength: replyLength(text))
+        return AIRequest(system: reverseSystem, user: user, schema: reverseSchema, expectedReplyLength: replyLength(text), streamField: "chinese")
     }
 
     public static func explain(text: String, translation: String?, context: String, terms: [Term]) -> AIRequest {

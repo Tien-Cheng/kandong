@@ -380,10 +380,23 @@ public struct CodexBackend: AIBackend {
         self.server = server
     }
 
-    public var kind: BackendKind { .codex }
 
     public var label: String {
         settings.model.isEmpty ? "Codex" : "Codex · \(settings.model)"
+    }
+
+    public func status() async -> BackendStatus {
+        guard CodexAppServer.locateCodex(settings.executablePath) != nil else {
+            return .needsSetup("The Codex CLI isn't installed.", fix: .copyCommand("brew install codex", label: "Copy install command"))
+        }
+        do {
+            try await server.ensureStarted(executablePath: settings.executablePath)
+            return .ready("Your ChatGPT subscription")
+        } catch BackendError.codexNotSignedIn {
+            return .needsSetup("Codex isn't signed in.", fix: .copyCommand("codex login", label: "Copy sign-in command"))
+        } catch {
+            return .unavailable(error.localizedDescription)
+        }
     }
 
     public func supportsImages() async -> Bool {
