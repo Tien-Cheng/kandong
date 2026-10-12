@@ -9,16 +9,28 @@ A macOS menu-bar tool for learning Chinese from the text you meet every day. Hig
 
 Highlight English instead and it shows how to say it in Chinese. See [GLOSSARY.md](GLOSSARY.md) for the vocabulary used in the code and [docs/adr](docs/adr) for the main decisions.
 
-## Build and install
+## Install
 
-Needs macOS 26+ and the Xcode Command Line Tools (full Xcode isn't required).
+Needs macOS 26+.
+
+```sh
+brew install --cask tien-cheng/tap/kandong
+```
+
+Or download `Kandong-<version>.zip` from [Releases](https://github.com/Tien-Cheng/kandong/releases) and move **Kandong.app** to Applications.
+
+Kandong isn't notarized by Apple (that needs a paid developer account), so macOS blocks the first launch: open it once, then go to **System Settings → Privacy & Security** and click **Open Anyway**. Then grant **Accessibility** (to read selected text and the tap key). **Screen Recording** is needed for region capture. Releases are all signed with the same certificate, so these permissions carry over when you update.
+
+## Build from source
+
+Needs the Xcode Command Line Tools (full Xcode isn't required).
 
 ```sh
 scripts/make-signing-identity.sh   # once: stable self-signed identity, so permissions survive rebuilds
 scripts/build-app.sh --install     # downloads dictionary data, builds, installs to ~/Applications, launches
 ```
 
-On first launch, grant **Accessibility** (to read selected text and the tap key). **Screen Recording** is needed for region capture. Tests: `swift test`. Live Codex round-trips: `KANDONG_LIVE=1 swift test --filter LiveCodexTests`.
+Tests: `swift test`. Live Codex round-trips: `KANDONG_LIVE=1 swift test --filter LiveCodexTests`. Releases are built by GitHub Actions; see [RELEASING.md](RELEASING.md).
 
 ## Use
 

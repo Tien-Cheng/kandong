@@ -1,0 +1,78 @@
+name: Release
+
+# Push a tag like v0.1.0 to build, sign and publish Kandong-0.1.0.zip as a GitHub Release, then
+# point the Homebrew cask at it. Tags with a "-" (v0.2.0-beta.1) skip the cask. See RELEASING.md.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - run: scripts/fetch-data.sh
+      - run: swift test
+      - name: Import signing identity
+        run: scripts/import-signing-identity.sh
+        env:
+          SIGNING_P12_BASE64: ${{ secrets.SIGNING_P12_BASE64 }}
+          SIGNING_P12_PASSWORD: ${{ secrets.SIGNING_P12_PASSWORD }}
+      - name: Build Kandong.app
+        run: scripts/build-app.sh
+        env:
+          SIGN_IDENTITY: Kandong Self-Signed
+          KANDONG_VERSION: ${{ github.ref_name }}
+      - name: Package
+        id: package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          zip="Kandong-$version.zip"
+          ditto -c -k --keepParent build/Kandong.app "$zip"
+          shasum -a 256 "$zip" > "$zip.sha256"
+          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ZIP: ${{ steps.package.outputs.zip }}
+        run: |
+          cat > notes.md <<'NOTES'
+          ## Install
+
+          1. Unzip and move **Kandong.app** to Applications.
+          2. Open it once. macOS blocks it because it isn't notarized, so go to **System Settings → Privacy & Security** and click **Open Anyway**.
+          3. Grant **Accessibility** when asked (and **Screen Recording** for region capture).
+
+          Updating: quit Kandong and replace the app. Permissions carry over between releases.
+
+          Needs macOS 26+. For translations, sign in to the [Codex CLI](https://github.com/openai/codex) (`codex login`) or run [LM Studio](https://lmstudio.ai).
+          NOTES
+          prerelease=()
+          [[ "$GITHUB_REF_NAME" == *-* ]] && prerelease=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" "$ZIP" "$ZIP.sha256" "${prerelease[@]}" \
+            --title "Kandong ${GITHUB_REF_NAME}" --notes-file notes.md --generate-notes --verify-tag
+      - name: Check out the Homebrew tap
+        if: ${{ !contains(github.ref_name, '-') }}
+        uses: actions/checkout@v5
+        with:
+          repository: Tien-Cheng/homebrew-tap
+          ssh-key: ${{ secrets.TAP_DEPLOY_KEY }}
+          path: homebrew-tap
+      - name: Update the cask
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          ZIP: ${{ steps.package.outputs.zip }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          sha="$(shasum -a 256 "$ZIP" | cut -d' ' -f1)"
+          cd homebrew-tap
+          sed -i '' -E "s/^  version \".*\"/  version \"$version\"/; s/^  sha256 \".*\"/  sha256 \"$sha\"/" Casks/kandong.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "kandong $version"
+          git push

@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/cache@v4
+        with:
+          path: Data
+          key: dictionary-data-${{ hashFiles('scripts/fetch-data.sh') }}
+      - run: scripts/fetch-data.sh
+      - run: swift test
+      - name: Build the app (ad-hoc signed)
+        run: scripts/build-app.sh
