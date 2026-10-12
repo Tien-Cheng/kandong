@@ -16,7 +16,7 @@ APP=build/Kandong.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Kandong"
-cp Data/cedict_ts.u8 Data/hsk.tsv "$APP/Contents/Resources/"
+cp Data/cedict_ts.u8 Data/hsk.tsv assets/AppIcon.icns "$APP/Contents/Resources/"
 # Marketing version from $KANDONG_VERSION or the latest v* tag; build number from the commit count.
 VERSION="${KANDONG_VERSION:-$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo 0.0.0)}"
 VERSION="${VERSION#v}"
@@ -31,6 +31,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleName</key><string>Kandong</string>
   <key>CFBundleDisplayName</key><string>Kandong</string>
   <key>CFBundleExecutable</key><string>Kandong</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleVersion</key><string>${BUILD}</string>

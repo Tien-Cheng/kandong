@@ -1,3 +1,5 @@
+<img src="assets/icon.svg" width="128" alt="Kandong icon: 懂 with a blue third-tone mark">
+
 # Kandong 看懂
 
 A macOS menu-bar tool for learning Chinese from the text you meet every day. Highlight Chinese anywhere — or snap a screen region, or copy an image — and get:
@@ -62,7 +64,7 @@ History and repeat-sighting counts are kept in `~/Library/Application Support/Ka
 
 ## Data
 
-Dictionary: [CC-CEDICT](https://www.mdbg.net/chinese/dictionary?page=cc-cedict) (CC BY-SA 4.0). HSK 3.0 levels: [complete-hsk-vocabulary](https://github.com/drkameleon/complete-hsk-vocabulary) (MIT). Both are downloaded by `scripts/fetch-data.sh` and not committed.
+Dictionary: [CC-CEDICT](https://www.mdbg.net/chinese/dictionary?page=cc-cedict) (CC BY-SA 4.0). HSK 3.0 levels: [complete-hsk-vocabulary](https://github.com/drkameleon/complete-hsk-vocabulary) (MIT). Both are downloaded by `scripts/fetch-data.sh` and not committed. The icon's 懂 is outlined from [LXGW WenKai](https://github.com/lxgw/LxgwWenKai) (SIL OFL 1.1).
 
 ## License
 
