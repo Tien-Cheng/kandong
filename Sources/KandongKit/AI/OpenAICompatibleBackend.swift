@@ -129,13 +129,13 @@ public struct OpenAICompatibleBackend: AIBackend {
 
     private enum Outcome { case done, rejectedSchema }
 
-    /// Servers word this differently: OpenAI "maximum context length", llama.cpp/LM Studio "n_ctx",
-    /// "context length", Ollama "exceeds the context", others "too many tokens".
+    /// Servers word this differently: OpenAI "maximum context length" / context_length_exceeded,
+    /// llama.cpp "exceeds the available context size", LM Studio "context length of only N tokens".
     static func isContextOverflow(status: Int, body: String) -> Bool {
         guard [400, 413, 422, 500].contains(status) else { return false }
         let text = body.lowercased()
-        return ["context length", "context window", "maximum context", "n_ctx", "exceeds the context",
-                "too many tokens", "context_length_exceeded", "prompt is too long"].contains { text.contains($0) }
+        return ["maximum context length", "context_length_exceeded", "exceeds the available context", "context length of only",
+                "exceeds the context window", "too many tokens", "prompt is too long"].contains { text.contains($0) }
     }
 
     private func stream(

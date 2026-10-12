@@ -142,9 +142,9 @@ private struct SessionView: View {
 
     /// "Long text — translating part 2 of 4…"; the count is unknown while a Backend is still halving.
     private func partProgressText(_ progress: LookupProgress) -> String {
-        let part = progress.completedParts + 1
+        if let total = progress.totalParts, progress.completedParts >= total { return "Long text — finishing…" }
         let of = progress.totalParts.map { " of \($0)" } ?? ""
-        return "Long text — translating part \(part)\(of)…"
+        return "Long text — translating part \(progress.completedParts + 1)\(of)…"
     }
 
     @ViewBuilder private var explanationSection: some View {
@@ -167,11 +167,12 @@ private struct SessionView: View {
                 if let error = session.explanationError, !session.explanation.isEmpty {
                     Text(error).font(.caption).foregroundStyle(.orange).lineLimit(2)
                 }
-                if session.hasMoreToExplain {
+                if session.hasMoreToExplain, let parts = session.explanationParts {
                     Button {
                         model.explain(session)
                     } label: {
-                        Label("Explain next part (\(session.explainedParts + 1) of \(session.explanationParts.count))", systemImage: "graduationcap")
+                        let next = "part \(parts.done + 1) of \(parts.count)"
+                        Label(session.explanationError == nil ? "Explain next \(next)" : "Retry \(next)", systemImage: "graduationcap")
                     }
                     .controlSize(.small)
                 }

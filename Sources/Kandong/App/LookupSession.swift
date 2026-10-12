@@ -40,13 +40,13 @@ final class LookupSession: Identifiable {
     var explanation = ""
     var isExplaining = false
     var explanationError: String?
-    /// A long text is explained one part at a time; empty until the first Explain.
-    var explanationParts: [String] = []
-    var explainedParts = 0
+    /// A long text is explained one part at a time; nil until the first Explain.
+    var explanationParts: ExplanationParts?
 
-    /// Whether some of a long text is still to be explained.
+    /// Whether some of the text is still to be explained (or a part failed and can be retried).
     var hasMoreToExplain: Bool {
-        !isExplaining && explainedParts > 0 && explainedParts < explanationParts.count
+        guard !isExplaining, let parts = explanationParts else { return false }
+        return !parts.isFinished && !explanation.isEmpty
     }
 
     @ObservationIgnored var tasks: [Task<Void, Never>] = []

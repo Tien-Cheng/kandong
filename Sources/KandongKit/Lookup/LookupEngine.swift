@@ -26,6 +26,41 @@ public enum Direction: String, Codable, Sendable {
     }
 }
 
+/// A text explained one part at a time: the whole text unless it is too long for the Backend.
+public struct ExplanationParts: Equatable, Sendable {
+    public private(set) var parts: [String]
+    /// How many parts have been explained.
+    public private(set) var done = 0
+
+    public init(_ parts: [String]) {
+        self.parts = parts.filter { !$0.isEmpty }
+    }
+
+    public var count: Int { parts.count }
+    public var current: String? { done < parts.count ? parts[done] : nil }
+    public var isFinished: Bool { done >= parts.count }
+
+    public mutating func finishCurrent() {
+        done = min(done + 1, parts.count)
+    }
+
+    /// Replaces the current part with smaller ones after it didn't fit; false if it can't get smaller.
+    public mutating func splitCurrent() -> Bool {
+        guard let current else { return false }
+        let sentences = TextChunker.sentences(current)
+        let smaller: [String]
+        if sentences.count > 1 {
+            let middle = sentences.count / 2
+            smaller = [sentences[..<middle].joined(), sentences[middle...].joined()]
+        } else {
+            smaller = TextChunker.smaller(current)
+        }
+        guard smaller.count > 1, smaller.allSatisfy({ !$0.isEmpty && $0.count < current.count }) else { return false }
+        parts.replaceSubrange(done...done, with: smaller)
+        return true
+    }
+}
+
 /// How far a Lookup has got when its text is sent in parts.
 public struct LookupProgress: Equatable, Sendable {
     public var completedParts: Int
@@ -68,9 +103,9 @@ public struct LookupEngine: Sendable {
                     askForReadings: step.askForReadings, preceding: preceding
                 )
             },
-            parse: { reply in
+            parse: { reply, part in
                 let parsed = try Prompts.parseLearn(reply)
-                if Self.isUntranslated(english: parsed.translation) { throw BackendError.untranslated }
+                if Self.isUntranslated(english: parsed.translation, source: part) { throw BackendError.untranslated }
                 return parsed
             },
             progress: { replies, total in
@@ -90,9 +125,9 @@ public struct LookupEngine: Sendable {
             request: { part, preceding, step in
                 Prompts.reverse(text: part, context: step.context(context), terms: workspace.matchingTerms(in: part), preceding: preceding)
             },
-            parse: { reply in
+            parse: { reply, part in
                 let parsed = try Prompts.parseReverse(reply)
-                if !parsed.chinese.containsHan { throw BackendError.untranslated }
+                if !parsed.chinese.containsHan, Self.needsTranslation(english: part) { throw BackendError.untranslated }
                 return parsed
             },
             progress: { replies, total in
@@ -116,21 +151,14 @@ public struct LookupEngine: Sendable {
     }
 
     /// The parts to explain one at a time: the whole text unless the Backend says it won't fit.
-    public func explanationParts(_ text: String, translation: String?, backend: AIBackend) async -> [String] {
-        guard await backend.fits(explainRequest(text, translation: translation)) == false else { return [text] }
+    public func explanationParts(_ text: String, translation: String?, backend: AIBackend) async -> ExplanationParts {
+        guard await backend.fits(explainRequest(text, translation: translation)) == false else { return ExplanationParts([text]) }
         let pieces = await TextChunker.pack(TextChunker.sentences(text)) { part, _ in
             await backend.fits(explainRequest(part, translation: nil)) ?? true
         }
-        return pieces?.map(\.text) ?? [text]
+        return ExplanationParts(pieces?.map(\.text) ?? [text])
     }
 
-    /// Splits a text the Backend said was too long to explain, for Backends that can't measure.
-    public func halvesToExplain(_ text: String) -> [String] {
-        let sentences = TextChunker.sentences(text)
-        guard sentences.count > 1 else { return TextChunker.smaller(text) }
-        let middle = sentences.count / 2
-        return [sentences[..<middle].joined(), sentences[middle...].joined()]
-    }
 
     // MARK: Fitting long text
 
@@ -162,7 +190,7 @@ public struct LookupEngine: Sendable {
         backend: AIBackend,
         steps: [PromptStep],
         request: (_ part: String, _ preceding: String?, PromptStep) -> AIRequest,
-        parse: (String) throws -> Reply,
+        parse: (_ reply: String, _ part: String) throws -> Reply,
         progress: (_ done: [(text: String, reply: Reply)], _ total: Int?) async -> Void
     ) async throws -> [(text: String, reply: Reply)] {
         var step = steps[steps.count - 1]
@@ -171,7 +199,7 @@ public struct LookupEngine: Sendable {
             let whole = request(text, nil, candidate)
             if await backend.fits(whole) == false { continue }
             do {
-                return [(text, try parse(try await backend.complete(whole)))]
+                return [(text, try parse(try await backend.complete(whole), text))]
             } catch BackendError.contextTooLong {
                 continue
             } catch BackendError.untranslated {
@@ -189,7 +217,7 @@ public struct LookupEngine: Sendable {
             try Task.checkCancellation()
             let part = units.joined()
             do {
-                let reply = try parse(try await backend.complete(request(part, preceding, step)))
+                let reply = try parse(try await backend.complete(request(part, preceding, step)), part)
                 done.append((part, reply))
                 await progress(done, total.map { max($0, done.count) })
             } catch let error as BackendError where error == .contextTooLong || error == .untranslated {
@@ -223,11 +251,24 @@ public struct LookupEngine: Sendable {
         return done
     }
 
-    /// Whether an English translation is still mostly Chinese characters.
-    static func isUntranslated(english: String) -> Bool {
-        let letters = english.filter(\.isLetter)
-        let han = letters.filter(\.isHan).count
-        return han > 0 && han * 3 > letters.count
+    /// Whether a reply copied the Chinese instead of translating it: it keeps at least half of the
+    /// source's Chinese characters and adds little English of its own. A real translation that quotes
+    /// a sign or a name in Chinese adds plenty of English, so it passes.
+    static func isUntranslated(english reply: String, source: String) -> Bool {
+        let sourceHan = source.filter(\.isHan).count
+        guard sourceHan >= 4 else { return false }
+        let latin: (String) -> Int = { $0.filter { $0.isLetter && !$0.isHan }.count }
+        let addedEnglish = latin(reply) - latin(source)
+        return reply.filter(\.isHan).count * 2 >= sourceHan && addedEnglish * 2 < sourceHan
+    }
+
+    /// Whether English has words to translate, beyond URLs, @mentions, #hashtags and numbers that are
+    /// kept as they are.
+    static func needsTranslation(english: String) -> Bool {
+        english.split(whereSeparator: \.isWhitespace).contains { word in
+            !(word.hasPrefix("@") || word.hasPrefix("#") || word.contains("://") || word.hasPrefix("www."))
+                && word.contains(where: \.isLetter)
+        }
     }
 
     /// Where to split units so both sides hold about half the characters.

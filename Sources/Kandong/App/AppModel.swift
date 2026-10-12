@@ -320,34 +320,39 @@ final class AppModel {
         session.explanationError = nil
         let translation = session.direction == .learn ? session.translation : session.sourceText
         session.tasks.append(Task {
-            if session.explanationParts.isEmpty {
+            defer { session.isExplaining = false }
+            if session.explanationParts == nil {
                 session.explanation = ""
                 session.explanationParts = await engine.explanationParts(session.chineseText, translation: translation, backend: backend)
             }
-            while session.explainedParts < session.explanationParts.count {
-                let parts = session.explanationParts
-                let index = session.explainedParts
-                let before = session.explanation
+            while !Task.isCancelled, var parts = session.explanationParts, let part = parts.current {
+                // A failed attempt is rolled back, so retrying never repeats a heading or half an answer.
+                let checkpoint = session.explanation
                 if parts.count > 1 {
-                    session.explanation += (index > 0 ? "\n\n---\n\n" : "") + "**Part \(index + 1) of \(parts.count)**\n\n"
+                    session.explanation += (parts.done > 0 ? "\n\n---\n\n" : "") + "**Part \(parts.done + 1) of \(parts.count)**\n\n"
                 }
                 do {
                     let reference = parts.count == 1 ? translation : nil
-                    for try await delta in engine.explain(parts[index], translation: reference, backend: backend) {
+                    for try await delta in engine.explain(part, translation: reference, backend: backend) {
                         session.explanation += delta
                     }
-                    session.explainedParts += 1
-                } catch BackendError.contextTooLong where parts.count == 1 {
-                    // A Backend that can't measure only finds out by trying; explain it in halves.
-                    session.explanation = before
-                    session.explanationParts = engine.halvesToExplain(parts[0])
-                    continue
+                    parts.finishCurrent()
+                    session.explanationParts = parts
+                    return
+                } catch BackendError.contextTooLong {
+                    session.explanation = checkpoint
+                    // Backends that can't measure only find out by trying; explain a smaller part.
+                    guard parts.splitCurrent() else {
+                        session.explanationError = BackendError.contextTooLong.localizedDescription
+                        return
+                    }
+                    session.explanationParts = parts
                 } catch {
+                    session.explanation = checkpoint
                     if !Task.isCancelled { session.explanationError = error.localizedDescription }
+                    return
                 }
-                break
             }
-            session.isExplaining = false
         })
     }
 

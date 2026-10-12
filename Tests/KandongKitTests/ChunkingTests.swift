@@ -29,6 +29,15 @@ import Testing
         #expect(pieces?.allSatisfy { $0.text.count <= 6 } == true)
     }
 
+    @Test func neverSplitsURLsOrWords() {
+        #expect(TextChunker.halves("https://example.com/a") == ["https://example.com/a"])
+        #expect(TextChunker.halves("你好你好https://example.com").joined() == "你好你好https://example.com")
+        #expect(TextChunker.halves("你好你好https://example.com").last == "https://example.com")
+        #expect(TextChunker.sentences("看这个https://a.com/?q=1 好吗？对。") == ["看这个https://a.com/?q=1 好吗？", "对。"])
+        #expect(TextChunker.clauses("见https://a.com/x,y 好，走") == ["见https://a.com/x,y 好，", "走"])
+        #expect(TextChunker.sentences("你好?我很好") == ["你好?", "我很好"])
+    }
+
     @Test func packGivesUpWhenNothingFits() async {
         #expect(await TextChunker.pack(["一二"]) { _, _ in false } == nil)
     }
@@ -44,6 +53,8 @@ private final class FakeBackend: AIBackend, @unchecked Sendable {
     let label = "Fake"
     let limit: Int
     let measures: Bool
+    /// Claims everything fits, like an estimate that turns out wrong.
+    var overconfident = false
     private let lock = NSLock()
     private var sent: [AIRequest] = []
 
@@ -57,7 +68,7 @@ private final class FakeBackend: AIBackend, @unchecked Sendable {
     func supportsImages() async -> Bool { false }
 
     func fits(_ request: AIRequest) async -> Bool? {
-        measures ? request.user.count <= limit : nil
+        overconfident ? true : measures ? request.user.count <= limit : nil
     }
 
     func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> {
@@ -70,6 +81,20 @@ private final class FakeBackend: AIBackend, @unchecked Sendable {
             let reverse = marker.lowerBound == request.user.range(of: "English:\n")?.lowerBound
             let reply: JSONValue = reverse ? ["chinese": .string(fakeChinese(text)), "note": ""] : ["translation": .string(fakeEnglish(text)), "readingCorrections": []]
             continuation.yield(String(data: try! reply.encoded(), encoding: .utf8)!)
+            continuation.finish()
+        }
+    }
+}
+
+/// Gives English back unchanged as its "Chinese".
+private struct EchoBackend: AIBackend {
+    let kind = BackendKind.custom
+    let label = "Echo"
+    func supportsImages() async -> Bool { false }
+    func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> {
+        let text = String(request.user[request.user.range(of: "English:\n")!.upperBound...])
+        return AsyncThrowingStream { continuation in
+            continuation.yield(String(data: try! JSONValue.object(["chinese": .string(text), "note": ""]).encoded(), encoding: .utf8)!)
             continuation.finish()
         }
     }
@@ -160,6 +185,21 @@ struct ChunkingTests {
         }
     }
 
+    @Test func recoversWhenAPartFitsOnPaperButNotInPractice() async throws {
+        let text = Self.sentences.joined()
+        let backend = FakeBackend(limit: 200, measures: true)
+        backend.overconfident = true
+        let engine = try engine()
+        let (translation, _) = try await engine.learn(engine.offline(text), backend: backend)
+        #expect(translation.replacingOccurrences(of: " ", with: "") == fakeEnglish(text))
+    }
+
+    @Test func reverseKeepsPassThroughParts() async throws {
+        let engine = try engine()
+        let (reply, _) = try await engine.reverse("123 @bob https://example.com", backend: EchoBackend())
+        #expect(reply.chinese == "123 @bob https://example.com")
+    }
+
     @Test func reverseJoinsChineseParts() async throws {
         let english = (1...10).map { "Sentence number \($0) is about going to the library this afternoon. " }.joined()
         let backend = FakeBackend(limit: 250, measures: true)
@@ -176,12 +216,49 @@ struct ChunkingTests {
         let engine = try engine()
         let (translation, _) = try await engine.learn(engine.offline(text), backend: backend)
         #expect(translation.split(separator: " ").count == 4)
-        #expect(!LookupEngine.isUntranslated(english: translation))
+        #expect(!LookupEngine.isUntranslated(english: translation, source: text))
     }
 
     @Test func spotsUntranslatedReplies() {
-        #expect(LookupEngine.isUntranslated(english: "第80天，我和小王一起去香山爬山。"))
-        #expect(!LookupEngine.isUntranslated(english: "Day 80: I went hiking at Xiangshan (香山) with Xiao Wang."))
+        let diary = "第80天，我和小王一起去香山爬山。"
+        #expect(LookupEngine.isUntranslated(english: diary, source: diary))
+        #expect(LookupEngine.isUntranslated(english: "第80天,我和小王一起去香山爬山.", source: diary))
+        #expect(!LookupEngine.isUntranslated(english: "Day 80: I went hiking at Xiangshan (香山) with Xiao Wang.", source: diary))
+        // Quoting a sign inside a real translation is fine.
+        let sign = "牌子上写着“禁止停车请勿占用消防通道”"
+        #expect(!LookupEngine.isUntranslated(english: "The sign says “禁止停车请勿占用消防通道” (no parking, keep the fire lane clear).", source: sign))
+        // Copied mixed text is caught when enough Chinese is left untranslated.
+        let mixed = "今天的会议改到明天下午了. The agenda stays the same."
+        #expect(LookupEngine.isUntranslated(english: mixed, source: mixed))
+        #expect(!LookupEngine.isUntranslated(english: "你好", source: "你好"))
+    }
+
+    @Test func knowsWhatEnglishNeedsTranslating() {
+        #expect(!LookupEngine.needsTranslation(english: "123 @bob #tag https://example.com www.a.com"))
+        #expect(LookupEngine.needsTranslation(english: "See you @bob"))
+    }
+
+    @Test func explanationPartsSplitUntilTheyCannot() {
+        var parts = ExplanationParts(["一。二。三。四。"])
+        var split = parts.splitCurrent()
+        #expect(split)
+        #expect(parts.parts == ["一。二。", "三。四。"])
+        parts.finishCurrent()
+        #expect(parts.current == "三。四。")
+        split = parts.splitCurrent()
+        #expect(split)
+        #expect(parts.parts == ["一。二。", "三。", "四。"])
+        // "三。" halves into "三" and "。"; a single character can't get smaller.
+        while parts.splitCurrent() {}
+        #expect(parts.current?.count == 1)
+
+        var single = ExplanationParts(["一"])
+        split = single.splitCurrent()
+        #expect(!split)
+        #expect(single.parts == ["一"])
+        var url = ExplanationParts(["https://example.com"])
+        split = url.splitCurrent()
+        #expect(!split)
     }
 
     @Test func keepsLineBreaksBetweenParts() {
@@ -194,8 +271,8 @@ struct ChunkingTests {
         let engine = try engine()
         let parts = await engine.explanationParts(text, translation: nil, backend: FakeBackend(limit: 150, measures: true))
         #expect(parts.count > 1)
-        #expect(parts.joined() == text)
-        #expect(await engine.explanationParts("你好。", translation: nil, backend: FakeBackend(limit: 4000, measures: true)) == ["你好。"])
+        #expect(parts.parts.joined() == text)
+        #expect(await engine.explanationParts("你好。", translation: nil, backend: FakeBackend(limit: 4000, measures: true)).parts == ["你好。"])
     }
 }
 
@@ -242,7 +319,7 @@ struct LiveChunkingTests {
         print("days mentioned: \(days.count) of 80; missing: \(Set(1...80).subtracting(days).sorted())")
         print("tail: \(translation.suffix(300))")
         #expect(total > 1)
-        #expect(!LookupEngine.isUntranslated(english: translation))
+        #expect(!LookupEngine.isUntranslated(english: translation, source: text))
         // Every day's entry made it into the English.
         #expect(days.count >= 76)
     }

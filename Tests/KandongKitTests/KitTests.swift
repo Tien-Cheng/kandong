@@ -240,6 +240,21 @@ struct LiveCodexTests {
     }
 }
 
+@Suite struct ContextOverflowTests {
+    @Test func recognisesServersOverflowMessages() {
+        let overflows = [
+            "This model's maximum context length is 8192 tokens. However, your messages resulted in 9000 tokens.",
+            #"{"error":{"code":"context_length_exceeded"}}"#,
+            "the request exceeds the available context size, try increasing it",
+            "Trying to keep the first 9000 tokens when context the overflows. However, the model is loaded with context length of only 4096 tokens",
+        ]
+        for message in overflows { #expect(OpenAICompatibleBackend.isContextOverflow(status: 400, body: message), "\(message)") }
+        #expect(!OpenAICompatibleBackend.isContextOverflow(status: 400, body: "Invalid value for n_ctx: must be positive"))
+        #expect(!OpenAICompatibleBackend.isContextOverflow(status: 400, body: "response_format json_schema is not supported"))
+        #expect(!OpenAICompatibleBackend.isContextOverflow(status: 401, body: "maximum context length"))
+    }
+}
+
 @Suite(.serialized) struct OpenAICompatibleTests {
     /// Starts the fake LM Studio server on a free port; the caller terminates it.
     func startServer(rejectSchema: Bool = false) async throws -> (Process, String) {

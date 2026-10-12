@@ -12,28 +12,39 @@ public enum TextChunker {
     public static func sentences(_ text: String) -> [String] {
         split(text) { character, next in
             if character.isNewline { return true }
-            if sentenceEnds.contains(character) { return true }
-            // "." ends an English sentence only before whitespace, so 3.5 and URLs stay whole.
-            return character == "." && (next == nil || next!.isWhitespace)
+            // ASCII marks end a sentence only before whitespace, so 3.5 and URLs (…/?q=1) stay whole.
+            if character.isASCII { return (sentenceEnds.contains(character) || character == ".") && endsToken(next) }
+            return sentenceEnds.contains(character)
         }
     }
 
     /// Clauses of one sentence, split after commas and similar marks.
     public static func clauses(_ sentence: String) -> [String] {
-        split(sentence) { character, _ in clauseEnds.contains(character) }
+        split(sentence) { character, next in
+            clauseEnds.contains(character) && (!character.isASCII || endsToken(next))
+        }
     }
 
-    /// The text cut into two halves by length; the last resort for a clause that won't fit.
+    /// The text cut into two halves near the middle; the last resort for a clause that won't fit.
+    /// Never cuts inside a run of non-Chinese characters (a URL, @mention or English word), which
+    /// the model must keep exactly; text that is all one such run stays whole.
     public static func halves(_ text: String) -> [String] {
-        guard text.count > 1 else { return [text] }
-        let middle = text.index(text.startIndex, offsetBy: text.count / 2)
-        return [String(text[..<middle]), String(text[middle...])]
+        let characters = Array(text)
+        guard characters.count > 1 else { return [text] }
+        func isWordPart(_ character: Character) -> Bool { character.isASCII && !character.isWhitespace }
+        let cuts = (1..<characters.count).filter { !(isWordPart(characters[$0 - 1]) && isWordPart(characters[$0])) }
+        guard let cut = cuts.min(by: { abs($0 - characters.count / 2) < abs($1 - characters.count / 2) }) else { return [text] }
+        return [String(characters[..<cut]), String(characters[cut...])]
     }
 
     /// Smaller pieces of a unit that doesn't fit: its clauses if it has several, else its halves.
     public static func smaller(_ unit: String) -> [String] {
         let parts = clauses(unit)
         return parts.count > 1 ? parts : halves(unit)
+    }
+
+    private static func endsToken(_ next: Character?) -> Bool {
+        next == nil || next!.isWhitespace || next!.isHan
     }
 
     private static func split(_ text: String, isBoundary: (Character, Character?) -> Bool) -> [String] {
