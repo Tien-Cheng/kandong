@@ -54,6 +54,115 @@ import UniformTypeIdentifiers
     }
 }
 
+@Suite struct SnapshotDeltaTests {
+    func deltas(_ snapshots: [String]) -> [String] {
+        var converter = SnapshotDeltas()
+        return snapshots.map { converter.next($0) }
+    }
+
+    @Test func sendsOnlyNewText() {
+        #expect(deltas(["你", "你好", "你好", "你好！"]) == ["你", "好", "", "！"])
+    }
+
+    @Test func sendsCombiningMarksOnTheirOwn() {
+        #expect(deltas(["n", "n\u{030C} hǎo"]).joined() == "n\u{030C} hǎo")
+        #expect(deltas(["\r", "\r\n"]) == ["\r", "\n"])
+    }
+
+    @Test func showsARevisionAsANewParagraph() {
+        #expect(deltas(["abc", "abX"]) == ["abc", "\n\nabX"])
+    }
+}
+
+/// A stand-in for the on-device model that records what was asked of it.
+private final class FakeModel: @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls: [String] = []
+    var structuredError: Error?
+    var snapshots = ["{\"translation\": \"Hi\"}"]
+    var endless = false
+    private(set) var snapshotStreamEnded = false
+
+    var log: [String] { lock.withLock { calls } }
+    private func record(_ call: String) { lock.withLock { calls.append(call) } }
+
+    var client: AppleModelClient {
+        AppleModelClient(
+            unavailability: { nil },
+            structured: { _, _, _ in
+                self.record("structured")
+                if let error = self.structuredError { throw error }
+                return #"{"translation": "Hello"}"#
+            },
+            snapshots: { _, _ in
+                self.record("snapshots")
+                return AsyncThrowingStream { continuation in
+                    let task = Task {
+                        for snapshot in self.snapshots { continuation.yield(snapshot) }
+                        while self.endless, !Task.isCancelled {
+                            continuation.yield("…")
+                            try? await Task.sleep(for: .milliseconds(5))
+                        }
+                        continuation.finish()
+                    }
+                    continuation.onTermination = { _ in
+                        task.cancel()
+                        self.lock.withLock { self.snapshotStreamEnded = true }
+                    }
+                }
+            }
+        )
+    }
+}
+
+@Suite struct AppleIntelligenceBackendTests {
+    let learn = AIRequest(system: "s", user: "你好", schema: Prompts.translationSchema)
+
+    @Test func structuredRepliesComeFromGuidedGeneration() async throws {
+        let model = FakeModel()
+        let reply = try await AppleIntelligenceBackend(client: model.client).complete(learn)
+        #expect(reply == #"{"translation": "Hello"}"#)
+        #expect(model.log == ["structured"])
+    }
+
+    @Test func retriesARefusalOnceAsPlainText() async throws {
+        let model = FakeModel()
+        model.structuredError = LanguageModelError.guardrailViolation(.init(debugDescription: ""))
+        model.snapshots = [#"{"transl"#, #"{"translation": "Hi"}"#]
+        let reply = try await AppleIntelligenceBackend(client: model.client).complete(learn)
+        #expect(reply == #"{"translation": "Hi"}"#)
+        #expect(model.log == ["structured", "snapshots"])
+    }
+
+    @Test func doesNotRetryOtherErrors() async {
+        let model = FakeModel()
+        model.structuredError = LanguageModelError.contextSizeExceeded(.init(contextSize: 10, tokenCount: 20, debugDescription: ""))
+        await #expect(throws: BackendError.contextTooLong) {
+            _ = try await AppleIntelligenceBackend(client: model.client).complete(learn)
+        }
+        #expect(model.log == ["structured"])
+    }
+
+    @Test func reportsUnavailabilityWithoutCallingTheModel() async {
+        let model = FakeModel()
+        var client = model.client
+        client.unavailability = { .notEnabled }
+        await #expect(throws: BackendError.appleIntelligenceUnavailable(.notEnabled)) {
+            _ = try await AppleIntelligenceBackend(client: client).complete(learn)
+        }
+        #expect(model.log.isEmpty)
+    }
+
+    @Test func stopsGeneratingWhenTheReaderStops() async throws {
+        let model = FakeModel()
+        model.snapshots = ["a"]
+        model.endless = true
+        for try await _ in AppleIntelligenceBackend(client: model.client).respond(to: AIRequest(system: "s", user: "explain")) { break }
+        for _ in 0..<200 where !model.snapshotStreamEnded { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(model.snapshotStreamEnded)
+    }
+}
+
 private let liveAppleIntelligence = ProcessInfo.processInfo.environment["KANDONG_LIVE"] == "1"
     && TestData.hasDictionary && AppleIntelligenceBackend.unavailability == nil
 

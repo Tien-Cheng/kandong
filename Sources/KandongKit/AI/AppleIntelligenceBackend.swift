@@ -31,6 +31,62 @@ public enum AppleIntelligenceUnavailability: Equatable, Sendable {
     public static let settingsURL = URL(string: "x-apple.systempreferences:com.apple.Siri-Settings.extension")!
 }
 
+/// The calls into the on-device model, replaceable in tests.
+struct AppleModelClient: Sendable {
+    var unavailability: @Sendable () -> AppleIntelligenceUnavailability?
+    /// One JSON object matching the schema, by guided generation (default guardrails).
+    var structured: @Sendable (_ prompt: Prompt, _ system: String, _ schema: GenerationSchema) async throws -> String
+    /// The plain-text reply so far, after each step of generation (permissive guardrails).
+    var snapshots: @Sendable (_ prompt: Prompt, _ system: String) -> AsyncThrowingStream<String, Error>
+
+    static let options = GenerationOptions(temperature: 0.2)
+
+    static let live = AppleModelClient(
+        unavailability: { AppleIntelligenceBackend.unavailability },
+        structured: { prompt, system, schema in
+            let session = LanguageModelSession(model: SystemLanguageModel.default, instructions: system)
+            return try await session.respond(to: prompt, schema: schema, options: options).content.jsonString
+        },
+        snapshots: { prompt, system in
+            AsyncThrowingStream { continuation in
+                let task = Task {
+                    do {
+                        let model = SystemLanguageModel(guardrails: .permissiveContentTransformations)
+                        let session = LanguageModelSession(model: model, instructions: system)
+                        for try await snapshot in session.streamResponse(to: prompt, options: options) {
+                            continuation.yield(snapshot.content)
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+                continuation.onTermination = { _ in task.cancel() }
+            }
+        }
+    )
+}
+
+/// Turns "the reply so far" snapshots into the text to append. Compares Unicode scalars, so a
+/// combining tone mark that extends the last character is sent on its own instead of looking
+/// like a rewrite.
+struct SnapshotDeltas {
+    private var sent: [Unicode.Scalar] = []
+
+    mutating func next(_ snapshot: String) -> String {
+        let scalars = Array(snapshot.unicodeScalars)
+        defer { sent = scalars }
+        if scalars.starts(with: sent) {
+            var delta = String.UnicodeScalarView()
+            delta.append(contentsOf: scalars[sent.count...])
+            return String(delta)
+        }
+        // The model revised earlier text. A stream can't take text back, so show the new version
+        // as a fresh paragraph (only display streams get here; JSON replies are taken whole).
+        return "\n\n" + snapshot
+    }
+}
+
 /// Apple's on-device Foundation Model. Never uses Private Cloud Compute (see ADR 0004).
 public struct AppleIntelligenceBackend: AIBackend {
     public let kind = BackendKind.appleIntelligence
@@ -39,8 +95,15 @@ public struct AppleIntelligenceBackend: AIBackend {
     /// The on-device model misses most 多音字 and sometimes "corrects" a right reading into a wrong
     /// one (see `PolyphoneEval`), so it only translates and the dictionary readings stand.
     public let correctsReadings = false
+    let client: AppleModelClient
 
-    public init() {}
+    public init() {
+        client = .live
+    }
+
+    init(client: AppleModelClient) {
+        self.client = client
+    }
 
     /// Nil when the model can answer, else why not.
     public static var unavailability: AppleIntelligenceUnavailability? {
@@ -62,22 +125,30 @@ public struct AppleIntelligenceBackend: AIBackend {
     }
 
     public func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> {
-        AsyncThrowingStream { continuation in
+        let client = client
+        return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    if let reason = Self.unavailability { throw BackendError.appleIntelligenceUnavailable(reason) }
+                    if let reason = client.unavailability() { throw BackendError.appleIntelligenceUnavailable(reason) }
                     let prompt = try Self.prompt(for: request)
                     if let schema = request.schema {
+                        let generationSchema = try Self.generationSchema(from: schema)
                         do {
-                            continuation.yield(try await Self.structured(prompt, system: request.system, schema: schema))
-                        } catch let error as LanguageModelError {
+                            continuation.yield(try await client.structured(prompt, request.system, generationSchema))
+                        } catch let error as LanguageModelError where Self.isRefusal(error) {
                             // Guided generation uses the default guardrails; retry once as plain text with the
-                            // permissive ones. The system prompt already asks for JSON.
-                            guard Self.isRefusal(error) else { throw error }
-                            try await Self.stream(prompt, system: request.system, into: continuation)
+                            // permissive ones (the system prompt already asks for JSON). Take the final text
+                            // whole so the JSON is never stitched from revised snapshots.
+                            var reply = ""
+                            for try await snapshot in client.snapshots(prompt, request.system) { reply = snapshot }
+                            continuation.yield(reply)
                         }
                     } else {
-                        try await Self.stream(prompt, system: request.system, into: continuation)
+                        var deltas = SnapshotDeltas()
+                        for try await snapshot in client.snapshots(prompt, request.system) {
+                            let delta = deltas.next(snapshot)
+                            if !delta.isEmpty { continuation.yield(delta) }
+                        }
                     }
                     continuation.finish()
                 } catch {
@@ -85,32 +156,6 @@ public struct AppleIntelligenceBackend: AIBackend {
                 }
             }
             continuation.onTermination = { _ in task.cancel() }
-        }
-    }
-
-    private static let options = GenerationOptions(temperature: 0.2)
-
-    private static func structured(_ prompt: Prompt, system: String, schema: JSONValue) async throws -> String {
-        let session = LanguageModelSession(model: SystemLanguageModel.default, instructions: system)
-        let response = try await session.respond(to: prompt, schema: try generationSchema(from: schema), options: options)
-        return response.content.jsonString
-    }
-
-    /// Streams plain text; the framework yields the whole reply so far, so send only what is new.
-    private static func stream(_ prompt: Prompt, system: String, into continuation: AsyncThrowingStream<String, Error>.Continuation) async throws {
-        let model = SystemLanguageModel(guardrails: .permissiveContentTransformations)
-        let session = LanguageModelSession(model: model, instructions: system)
-        var sent = ""
-        for try await snapshot in session.streamResponse(to: prompt, options: options) {
-            let text = snapshot.content
-            if text.hasPrefix(sent) {
-                let delta = String(text.dropFirst(sent.count))
-                if !delta.isEmpty { continuation.yield(delta) }
-            } else {
-                // The model revised earlier text; the stream can't take it back, so start a new paragraph.
-                continuation.yield("\n\n" + text)
-            }
-            sent = text
         }
     }
 
