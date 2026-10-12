@@ -8,12 +8,15 @@ public struct AIRequest: Sendable {
     public var image: Data?
     /// When set, the reply must be one JSON object matching this schema.
     public var schema: JSONValue?
+    /// Roughly how many characters the reply will be, so Backends with a small context can leave room for it.
+    public var expectedReplyLength: Int
 
-    public init(system: String, user: String, image: Data? = nil, schema: JSONValue? = nil) {
+    public init(system: String, user: String, image: Data? = nil, schema: JSONValue? = nil, expectedReplyLength: Int = 500) {
         self.system = system
         self.user = user
         self.image = image
         self.schema = schema
+        self.expectedReplyLength = expectedReplyLength
     }
 }
 
@@ -25,12 +28,17 @@ public protocol AIBackend: Sendable {
     func supportsImages() async -> Bool
     /// Whether to ask this Backend to correct dictionary readings in context (多音字).
     var correctsReadings: Bool { get }
+    /// Whether the request and its reply fit in the model's context; nil when the Backend can't
+    /// tell, in which case it reports `BackendError.contextTooLong` if it doesn't.
+    func fits(_ request: AIRequest) async -> Bool?
     /// Streams the reply as text deltas.
     func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error>
 }
 
 extension AIBackend {
     public var correctsReadings: Bool { true }
+
+    public func fits(_ request: AIRequest) async -> Bool? { nil }
 
     /// The whole reply as one string.
     public func complete(_ request: AIRequest) async throws -> String {
@@ -54,6 +62,8 @@ public enum BackendError: LocalizedError, Equatable {
     case contextTooLong
     /// The model declined to answer (content guardrails).
     case refused(name: String)
+    /// The model gave the text back, or only part of it, instead of translating it all.
+    case untranslated
 
     public var errorDescription: String? {
         switch self {
@@ -77,6 +87,8 @@ public enum BackendError: LocalizedError, Equatable {
             reason.message
         case .contextTooLong:
             "The text is too long for this model."
+        case .untranslated:
+            "The AI didn't translate all of the text."
         case .refused(let name):
             "\(name) declined this text — try another backend."
         }

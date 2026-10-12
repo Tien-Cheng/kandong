@@ -129,6 +129,15 @@ public struct OpenAICompatibleBackend: AIBackend {
 
     private enum Outcome { case done, rejectedSchema }
 
+    /// Servers word this differently: OpenAI "maximum context length" / context_length_exceeded,
+    /// llama.cpp "exceeds the available context size", LM Studio "context length of only N tokens".
+    static func isContextOverflow(status: Int, body: String) -> Bool {
+        guard [400, 413, 422, 500].contains(status) else { return false }
+        let text = body.lowercased()
+        return ["maximum context length", "context_length_exceeded", "exceeds the available context", "context length of only",
+                "exceeds the context window", "too many tokens", "prompt is too long"].contains { text.contains($0) }
+    }
+
     private func stream(
         _ request: AIRequest, model: String, useSchema: Bool,
         continuation: AsyncThrowingStream<String, Error>.Continuation
@@ -177,6 +186,7 @@ public struct OpenAICompatibleBackend: AIBackend {
         guard (200..<300).contains(status) else {
             var text = ""
             for try await line in bytes.lines { text += line }
+            if Self.isContextOverflow(status: status, body: text) { throw BackendError.contextTooLong }
             if useSchema, status == 400 || status == 422 { return .rejectedSchema }
             throw BackendError.http(status: status, body: text)
         }
@@ -185,7 +195,10 @@ public struct OpenAICompatibleBackend: AIBackend {
             let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
             if payload == "[DONE]" { break }
             guard let json = try? JSONValue.decode(Data(payload.utf8)) else { continue }
-            if let message = json["error"]?["message"]?.string { throw BackendError.failed(message) }
+            if let message = json["error"]?["message"]?.string {
+                if Self.isContextOverflow(status: 400, body: message) { throw BackendError.contextTooLong }
+                throw BackendError.failed(message)
+            }
             if let delta = json["choices"]?.array?.first?["delta"]?["content"]?.string, !delta.isEmpty {
                 continuation.yield(delta)
             }

@@ -29,6 +29,11 @@ public struct ReverseReply: Codable, Hashable, Sendable {
     /// Register or usage remarks, possibly empty.
     public var note: String
 
+    public init(chinese: String, note: String = "") {
+        self.chinese = chinese
+        self.note = note
+    }
+
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         chinese = try c.decode(String.self, forKey: .chinese)
@@ -119,6 +124,24 @@ public enum Prompts {
     Do not translate, explain or add anything. If there is no text, reply with nothing.
     """
 
+    /// Room for a reply to `text`: an English translation of Chinese runs about 0.9 tokens a character, plus the JSON.
+    static func replyLength(_ text: String) -> Int {
+        text.count * 6 / 5 + 200
+    }
+
+    private static func precedingNote(_ preceding: String?) -> String {
+        guard let preceding = preceding?.trimmingCharacters(in: .whitespacesAndNewlines), !preceding.isEmpty else { return "" }
+        return "Preceding text (for context only; don't translate it):\n\(preceding.suffix(200))\n\n"
+    }
+
+    /// Context cut to about `limit` characters at a line break, for prompts that are short of room.
+    public static func trimmed(context: String, limit: Int) -> String {
+        guard context.count > limit else { return context }
+        let head = context.prefix(limit)
+        let cut = head.lastIndex(of: "\n").map { head[..<$0] } ?? head
+        return String(cut).trimmingCharacters(in: .whitespacesAndNewlines) + " …"
+    }
+
     private static func steering(context: String, terms: [Term]) -> String {
         var parts: [String] = []
         if !context.isEmpty { parts.append("About me:\n\(context)") }
@@ -131,22 +154,27 @@ public enum Prompts {
         return parts.joined(separator: "\n\n")
     }
 
-    /// With `askForReadings` off, the reply has only the Translation.
-    public static func learn(text: String, analysis: OfflineAnalysis, context: String, terms: [Term], askForReadings: Bool = true) -> AIRequest {
+    /// With `askForReadings` off, the reply has only the Translation. `preceding` is the text just
+    /// before this part of a longer text, given for context only.
+    public static func learn(
+        text: String, analysis: OfflineAnalysis, context: String, terms: [Term], askForReadings: Bool = true, preceding: String? = nil
+    ) -> AIRequest {
         var user = steering(context: context, terms: terms)
         if !user.isEmpty { user += "\n\n" }
-        user += "Text:\n\(text)"
-        guard askForReadings else { return AIRequest(system: translateSystem, user: user, schema: translationSchema) }
+        user += precedingNote(preceding) + "Text:\n\(text)"
+        guard askForReadings else {
+            return AIRequest(system: translateSystem, user: user, schema: translationSchema, expectedReplyLength: replyLength(text))
+        }
         let readings = analysis.uniqueWords.map { "\($0.text) [\($0.pinyin)]" }.joined(separator: "\n")
         user += "\n\nDictionary pinyin:\n\(readings)"
-        return AIRequest(system: learnSystem, user: user, schema: learnSchema)
+        return AIRequest(system: learnSystem, user: user, schema: learnSchema, expectedReplyLength: replyLength(text))
     }
 
-    public static func reverse(text: String, context: String, terms: [Term]) -> AIRequest {
+    public static func reverse(text: String, context: String, terms: [Term], preceding: String? = nil) -> AIRequest {
         var user = steering(context: context, terms: terms)
         if !user.isEmpty { user += "\n\n" }
-        user += "English:\n\(text)"
-        return AIRequest(system: reverseSystem, user: user, schema: reverseSchema)
+        user += precedingNote(preceding) + "English:\n\(text)"
+        return AIRequest(system: reverseSystem, user: user, schema: reverseSchema, expectedReplyLength: replyLength(text))
     }
 
     public static func explain(text: String, translation: String?, context: String, terms: [Term]) -> AIRequest {
@@ -154,7 +182,8 @@ public enum Prompts {
         if !user.isEmpty { user += "\n\n" }
         user += "Text:\n\(text)"
         if let translation, !translation.isEmpty { user += "\n\nTranslation (for reference):\n\(translation)" }
-        return AIRequest(system: explainSystem, user: user)
+        // Explanations run several times longer than the text.
+        return AIRequest(system: explainSystem, user: user, expectedReplyLength: 800 + text.count * 4)
     }
 
     public static func transcribe(image: Data) -> AIRequest {

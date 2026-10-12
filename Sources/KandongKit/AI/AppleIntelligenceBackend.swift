@@ -124,6 +124,23 @@ public struct AppleIntelligenceBackend: AIBackend {
         Self.unavailability == nil && SystemLanguageModel.default.capabilities.contains(.vision)
     }
 
+    /// Counts the prompt's tokens and leaves room for the reply (Chinese is about a token a character).
+    public func fits(_ request: AIRequest) async -> Bool? {
+        guard Self.unavailability == nil, request.image == nil else { return nil }
+        let model = SystemLanguageModel.default
+        do {
+            var tokens = try await model.tokenCount(for: Instructions(request.system))
+            tokens += try await model.tokenCount(for: Prompt(request.user))
+            if let schema = request.schema { tokens += try await model.tokenCount(for: try Self.generationSchema(from: schema)) }
+            return tokens + request.expectedReplyLength + Self.overhead <= model.contextSize
+        } catch {
+            return nil
+        }
+    }
+
+    /// Slack for the chat template and rounding.
+    static let overhead = 128
+
     public func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> {
         let client = client
         return AsyncThrowingStream { continuation in

@@ -114,7 +114,14 @@ private struct SessionView: View {
     @ViewBuilder private var translationSection: some View {
         switch session.status {
         case .translating:
-            ProgressRow(text: session.direction == .reverse ? "Finding the Chinese…" : "Translating…")
+            if let progress = session.progress {
+                if !progress.translation.isEmpty {
+                    TranslationBox(text: progress.translation)
+                }
+                ProgressRow(text: partProgressText(progress))
+            } else {
+                ProgressRow(text: session.direction == .reverse ? "Finding the Chinese…" : "Translating…")
+            }
         case .failed(let message):
             VStack(alignment: .leading, spacing: 6) {
                 Label(message, systemImage: "exclamationmark.triangle")
@@ -125,17 +132,19 @@ private struct SessionView: View {
             }
         case .done, .readingImage:
             if session.direction == .learn, let translation = session.translation {
-                Text(translation)
-                    .font(.body)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
-                    .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+                TranslationBox(text: translation)
             }
             if let note = session.note {
                 Text(note).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
             }
         }
+    }
+
+    /// "Long text — translating part 2 of 4…"; the count is unknown while a Backend is still halving.
+    private func partProgressText(_ progress: LookupProgress) -> String {
+        if let total = progress.totalParts, progress.completedParts >= total { return "Long text — finishing…" }
+        let of = progress.totalParts.map { " of \($0)" } ?? ""
+        return "Long text — translating part \(progress.completedParts + 1)\(of)…"
     }
 
     @ViewBuilder private var explanationSection: some View {
@@ -155,6 +164,18 @@ private struct SessionView: View {
                 SectionTitle("Explanation")
                 MarkdownText(markdown: Prompts.visibleText(session.explanation))
                 if session.isExplaining { ProgressView().controlSize(.small) }
+                if let error = session.explanationError, !session.explanation.isEmpty {
+                    Text(error).font(.caption).foregroundStyle(.orange).lineLimit(2)
+                }
+                if session.hasMoreToExplain, let parts = session.explanationParts {
+                    Button {
+                        model.explain(session)
+                    } label: {
+                        let next = "part \(parts.done + 1) of \(parts.count)"
+                        Label(session.explanationError == nil ? "Explain next \(next)" : "Retry \(next)", systemImage: "graduationcap")
+                    }
+                    .controlSize(.small)
+                }
             }
         }
     }
@@ -414,6 +435,19 @@ private struct TermEditor: View {
 }
 
 // MARK: - Small pieces
+
+private struct TranslationBox: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.body)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
 
 private struct BackendBadge: View {
     let label: String
