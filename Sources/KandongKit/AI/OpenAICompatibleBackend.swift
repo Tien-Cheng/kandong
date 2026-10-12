@@ -75,17 +75,36 @@ public struct OpenAICompatibleBackend: AIBackend {
         if config.preset?.needsKey == true, apiKey?.isEmpty ?? true {
             return .needsSetup("Add your \(config.preset?.displayName ?? name) API key.")
         }
+        // Ask the server even when a model is configured, so a stopped server or a bad key shows up.
         do {
-            let model = try await resolveModel()
+            let models = try await availableModels()
+            guard let model = settings.model.isEmpty ? models.first : settings.model else {
+                return .needsSetup(isLMStudio ? "LM Studio has no models yet. Download one in LM Studio." : "\(name) lists no models. Set a model name.")
+            }
             return .ready(config.isOnDevice ? "On this Mac · \(model)" : model)
-        } catch BackendError.serverUnavailable {
+        } catch BackendError.http(let status, _) where status == 401 || status == 403 {
+            return .needsSetup("\(name) rejected the API key.")
+        } catch {
             if isLMStudio {
                 return .needsSetup("LM Studio's server isn't running.", fix: .openApp(bundleID: LMStudio.bundleID, label: "Open LM Studio"))
             }
             return .needsSetup("\(name) isn't reachable at \(settings.baseURL).")
-        } catch {
-            return .needsSetup(error.localizedDescription)
         }
+    }
+
+    /// The model ids the server offers (LM Studio: chat models, loaded ones first).
+    func availableModels() async throws -> [String] {
+        if isLMStudio { return try await LMStudio.models(baseURL: baseURL).map(\.id) }
+        guard let url = URL(string: baseURL + "/models") else {
+            throw BackendError.serverUnavailable(name: name, url: baseURL, hint: "Check the server URL in Settings.")
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        if let apiKey, !apiKey.isEmpty { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 200
+        guard (200..<300).contains(status) else { throw BackendError.http(status: status, body: String(decoding: data, as: UTF8.self)) }
+        return (try? JSONValue.decode(data))?["data"]?.array?.compactMap { $0["id"]?.string } ?? []
     }
 
     public func supportsImages() async -> Bool {

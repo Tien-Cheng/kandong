@@ -39,13 +39,24 @@ struct AIBackendsView: View {
                 Text("Add Ollama, OpenRouter, OpenAI or any OpenAI-compatible server. Right-click a Backend to make it the default.")
             }
 
-            if let index = model.settings.backends.firstIndex(where: { $0.id == selectedID }) {
-                BackendDetail(model: model, config: $model.settings.backends[index]) { selectedID = BackendConfig.appleIntelligence.id }
+            if let config = model.settings.backend(id: selectedID) {
+                BackendDetail(model: model, config: binding(for: config)) { selectedID = BackendConfig.appleIntelligence.id }
                     .id(selectedID)
             }
         }
         .formStyle(.grouped)
         .task { await model.refreshStatuses() }
+    }
+
+    /// Looks the Backend up by id on every access, so a removed one can't index past the list.
+    private func binding(for config: BackendConfig) -> Binding<BackendConfig> {
+        Binding(
+            get: { model.settings.backend(id: config.id) ?? config },
+            set: { updated in
+                guard let index = model.settings.backends.firstIndex(where: { $0.id == config.id }) else { return }
+                model.settings.backends[index] = updated
+            }
+        )
     }
 
     @ViewBuilder private func menu(for config: BackendConfig) -> some View {
@@ -192,6 +203,7 @@ private struct BackendDetail: View {
         testing = true
         testResult = ""
         let backend = model.backend(for: config)
+        let id = config.id
         Task {
             let started = Date()
             do {
@@ -202,7 +214,7 @@ private struct BackendDetail: View {
             } catch {
                 testResult = error.localizedDescription
             }
-            await model.refreshStatuses(only: config.id)
+            await model.refreshStatuses(only: id)
             testing = false
         }
     }
@@ -254,8 +266,9 @@ private struct OpenAIFields: View {
         if config.preset != .lmStudio && config.preset != .ollama {
             SecureField(config.preset?.needsKey == true ? "API key" : "API key (optional)", text: $apiKey)
                 .onChange(of: apiKey) {
+                    let id = config.id
                     Keychain.write(apiKey, for: config.keychainAccount)
-                    Task { await model.refreshStatuses(only: config.id) }
+                    Task { await model.refreshStatuses(only: id) }
                 }
         }
         if config.isLMStudio && !lmModels.isEmpty {
@@ -283,7 +296,8 @@ private struct OpenAIFields: View {
     }
 
     private func refresh() async {
-        if config.isLMStudio { lmModels = (try? await LMStudio.models(baseURL: settings.wrappedValue.baseURL)) ?? [] }
-        await model.refreshStatuses(only: config.id)
+        let id = config.id, baseURL = settings.wrappedValue.baseURL, isLMStudio = config.isLMStudio
+        if isLMStudio { lmModels = (try? await LMStudio.models(baseURL: baseURL)) ?? [] }
+        await model.refreshStatuses(only: id)
     }
 }

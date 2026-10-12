@@ -192,6 +192,23 @@ struct CorrectionTests {
         #expect(settings.backends.map(\.id) == ["apple-intelligence", "codex", "lmstudio"], "built-ins can't be removed")
     }
 
+    @Test func localBackendStopsBeingLocalWhenItsURLGoesRemote() {
+        var settings = AppSettings()
+        settings.localBackendID = "lmstudio"
+        #expect(settings.backend(local: true).id == "lmstudio")
+        let index = settings.backends.firstIndex { $0.id == "lmstudio" }!
+        settings.backends[index].openAI?.baseURL = "https://lmstudio.example.com/v1"
+        #expect(settings.backend(local: true).id == "apple-intelligence")
+        #expect(settings.normalized().localBackendID == "apple-intelligence")
+    }
+
+    @Test func migratesAChosenCustomEndpointEvenWithoutItsSettings() throws {
+        let settings = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"defaultBackend": "custom", "localBackend": "custom"}"#.utf8))
+        #expect(settings.defaultBackendID == "custom")
+        #expect(settings.localBackendID == "custom")
+        #expect(settings.backend(id: "custom")?.openAI?.baseURL == "http://localhost:11434/v1")
+    }
+
     @Test func keepsBuiltInsInAnEditedFile() throws {
         let settings = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"backends": [], "defaultBackendID": "gone"}"#.utf8))
         #expect(settings.backends.map(\.id) == ["apple-intelligence", "codex"])
@@ -296,6 +313,18 @@ struct LiveCodexTests {
         #expect(PartialJSON.stringValue(of: "t", in: #"{"t": "ok\ud83d"#) == "ok")
         #expect(PartialJSON.stringValue(of: "t", in: #"{"t": "ok\"#) == "ok")
     }
+
+    @Test func survivesMalformedSurrogates() {
+        #expect(PartialJSON.stringValue(of: "t", in: #"{"t": "a\ud800\u0000b"}"#) == "a")
+        #expect(PartialJSON.stringValue(of: "t", in: #"{"t": "a\ud800\ue000b"}"#) == "a")
+        #expect(PartialJSON.stringValue(of: "t", in: #"{"t": "a\udc00b"}"#) == "a")
+    }
+
+    @Test func onlyMatchesKeys() {
+        #expect(PartialJSON.stringValue(of: "chinese", in: #"{"note": "chinese", "chinese": "你好"}"#) == "你好")
+        #expect(PartialJSON.stringValue(of: "translation", in: #"{"translation": "the word \"translation\": means"}"#) == #"the word "translation": means"#)
+        #expect(PartialJSON.stringValue(of: "chinese", in: #"{"note": "chinese"#) == nil)
+    }
 }
 
 @Suite struct ContextOverflowTests {
@@ -382,6 +411,9 @@ struct LiveCodexTests {
     @Test func reportsWhatEachBackendNeeds() async throws {
         let down = OpenAICompatibleBackend(config: Self.config(.lmStudio, "http://127.0.0.1:9/v1"))
         #expect(await down.status() == .needsSetup("LM Studio's server isn't running.", fix: .openApp(bundleID: LMStudio.bundleID, label: "Open LM Studio")))
+        var configured = Self.config(.lmStudio, "http://127.0.0.1:9/v1")
+        configured.openAI?.model = "qwen3"
+        #expect(await OpenAICompatibleBackend(config: configured).status().isReady == false, "a chosen model doesn't make a stopped server ready")
         let noKey = OpenAICompatibleBackend(config: Self.config(.openRouter, "http://127.0.0.1:9/v1"))
         #expect(await noKey.status() == .needsSetup("Add your OpenRouter API key."))
 

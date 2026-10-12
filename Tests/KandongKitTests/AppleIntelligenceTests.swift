@@ -79,6 +79,8 @@ private final class FakeModel: @unchecked Sendable {
     private let lock = NSLock()
     private var calls: [String] = []
     var structuredError: Error?
+    /// Partial JSON sent before `structuredError` is thrown.
+    var structuredBeforeError: [String] = []
     var snapshots = ["{\"translation\": \"Hi\"}"]
     var endless = false
     private(set) var snapshotStreamEnded = false
@@ -92,7 +94,9 @@ private final class FakeModel: @unchecked Sendable {
             structured: { _, _, _ in
                 self.record("structured")
                 let error = self.structuredError
+                let before = self.structuredBeforeError
                 return AsyncThrowingStream { continuation in
+                    for snapshot in before { continuation.yield(snapshot) }
                     if let error { return continuation.finish(throwing: error) }
                     continuation.yield(#"{"translation": "Hel"}"#)
                     continuation.yield(#"{"translation": "Hello"}"#)
@@ -143,6 +147,17 @@ private final class FakeModel: @unchecked Sendable {
         let reply = try await AppleIntelligenceBackend(client: model.client).complete(learn)
         #expect(reply == #"{"translation": "Hi"}"#)
         #expect(model.log == ["structured", "snapshots"])
+    }
+
+    @Test func aRefusalPartwayReplacesThePartialReply() async throws {
+        let model = FakeModel()
+        model.structuredBeforeError = [#"{"translation": "Wh"}"#]
+        model.structuredError = LanguageModelError.refusal(.init(explanation: "no", debugDescription: ""))
+        model.snapshots = [#"{"transl"#, #"{"translation": "Hi"}"#]
+        var snapshots: [String] = []
+        for try await snapshot in AppleIntelligenceBackend(client: model.client).snapshots(of: learn) { snapshots.append(snapshot) }
+        #expect(snapshots.last == #"{"translation": "Hi"}"#)
+        #expect(try await AppleIntelligenceBackend(client: model.client).complete(learn) == #"{"translation": "Hi"}"#)
     }
 
     @Test func doesNotRetryOtherErrors() async {

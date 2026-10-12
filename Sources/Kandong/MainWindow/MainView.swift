@@ -229,7 +229,9 @@ private struct TermsView: View {
             }
         }
         .onAppear(perform: reload)
-        .onChange(of: model.workspaceRevision) { if !dirty { reload() } }
+        // Only outside edits reload the table; our own save leaves the file matching it, so rows keep
+        // their identity (and the field being typed in keeps focus).
+        .onChange(of: model.workspaceRevision) { if !dirty && model.workspace.terms() != cleaned { reload() } }
         .onDisappear { if dirty { save() } }
     }
 

@@ -24,8 +24,13 @@ final class LookupSession: Identifiable {
     /// Register remark for Reverse Lookups.
     var note: String?
     var status: Status = .translating
-    /// The Backend answering this Lookup.
-    var backendID = ""
+    /// The Backend answering this Lookup, as it was when the Lookup started.
+    var backend = BackendConfig.appleIntelligence
+    var backendID: String { backend.id }
+    /// The Backend the user picked for Explain instead, if any; later parts keep using it.
+    var explanationBackend: BackendConfig?
+    /// The image, for image Lookups, so another Backend can read it again.
+    var image: Data?
     var backendLabel = ""
     /// Whether the Backend keeps text on this Mac (shown in the badge).
     var backendIsLocal = false

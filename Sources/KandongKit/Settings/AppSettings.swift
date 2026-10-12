@@ -101,9 +101,21 @@ public struct AppSettings: Codable, Hashable, Sendable {
         backends.first { $0.id == id }
     }
 
-    /// The Backend for a Lookup: the Local one when ⇧ is held.
+    /// The Backend for a Lookup: the Local one when ⇧ is held. The Local one must keep text on this
+    /// Mac, even if its URL was edited since it was chosen; otherwise Apple Intelligence answers.
     public func backend(local: Bool) -> BackendConfig {
-        backend(id: local ? localBackendID : defaultBackendID) ?? .appleIntelligence
+        guard local else { return backend(id: defaultBackendID) ?? .appleIntelligence }
+        guard let config = backend(id: localBackendID), config.isOnDevice else { return .appleIntelligence }
+        return config
+    }
+
+    /// The same settings with Default and Local pointing at Backends that exist (and a Local one on
+    /// this Mac), so edits like changing a URL or removing a Backend can't leave them dangling.
+    public func normalized() -> AppSettings {
+        var settings = self
+        if backend(id: defaultBackendID) == nil { settings.defaultBackendID = BackendConfig.appleIntelligence.id }
+        if backend(id: localBackendID)?.isOnDevice != true { settings.localBackendID = BackendConfig.appleIntelligence.id }
+        return settings
     }
 
     /// Backends that keep text on this Mac, which may be the Local backend.
@@ -142,8 +154,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         } else {
             try migrateLegacyBackends(from: decoder)
         }
-        if backend(id: defaultBackendID) == nil { defaultBackendID = d.defaultBackendID }
-        if backend(id: localBackendID)?.isOnDevice != true { localBackendID = d.localBackendID }
+        self = normalized()
         codex = (try? c.decodeIfPresent(CodexSettings.self, forKey: .codex)) ?? d.codex
         hotkeys = d.hotkeys.merging((try? c.decodeIfPresent([HotkeyAction: KeyCombo].self, forKey: .hotkeys)) ?? [:]) { $1 }
         tapKey = (try? c.decodeIfPresent(TapKey.self, forKey: .tapKey)) ?? d.tapKey
@@ -160,7 +171,11 @@ public struct AppSettings: Codable, Hashable, Sendable {
         var lmStudio = BackendConfig.openAI(.lmStudio, id: "lmstudio")
         if let settings = try? legacy.decodeIfPresent(OpenAISettings.self, forKey: .lmStudio) { lmStudio.openAI = settings }
         backends = [.appleIntelligence, .codex, lmStudio]
-        if let settings = try? legacy.decodeIfPresent(OpenAISettings.self, forKey: .custom) {
+        let kinds = [LegacyKeys.defaultBackend, .localBackend].map { try? legacy.decodeIfPresent(String.self, forKey: $0) }
+        // Old versions always saved the custom endpoint; if it's missing but chosen, use its old default.
+        let customSettings = (try? legacy.decodeIfPresent(OpenAISettings.self, forKey: .custom))
+            ?? (kinds.contains("custom") ? OpenAISettings(baseURL: "http://localhost:11434/v1") : nil)
+        if let settings = customSettings {
             let preset: OpenAIPreset = URL(string: settings.baseURL)?.port == 11434 ? .ollama : .other
             var custom = BackendConfig.openAI(preset, id: "custom")
             custom.openAI = settings
@@ -175,8 +190,17 @@ public struct AppSettings: Codable, Hashable, Sendable {
             default: nil
             }
         }
-        defaultBackendID = id(forKind: try? legacy.decodeIfPresent(String.self, forKey: .defaultBackend)) ?? BackendConfig.appleIntelligence.id
-        localBackendID = id(forKind: try? legacy.decodeIfPresent(String.self, forKey: .localBackend)) ?? BackendConfig.appleIntelligence.id
+        defaultBackendID = id(forKind: kinds[0] ?? nil) ?? BackendConfig.appleIntelligence.id
+        localBackendID = id(forKind: kinds[1] ?? nil) ?? BackendConfig.appleIntelligence.id
+    }
+}
+
+extension OpenAISettings {
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        baseURL = try c.decode(String.self, forKey: .baseURL)
+        model = (try? c.decodeIfPresent(String.self, forKey: .model)) ?? ""
+        vision = (try? c.decodeIfPresent(VisionSupport.self, forKey: .vision)) ?? .auto
     }
 }
 

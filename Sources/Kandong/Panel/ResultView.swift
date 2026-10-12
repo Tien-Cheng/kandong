@@ -127,7 +127,7 @@ private struct SessionView: View {
                 ProgressRow(text: session.direction == .reverse ? "Finding the Chinese…" : "Translating…")
             }
         case .failed(let message):
-            FailureCard(model: model, session: session, message: message)
+            FailureCard(model: model, session: session, config: session.backend, message: message)
         case .done, .readingImage:
             if session.direction == .learn, let translation = session.translation {
                 TranslationBox(text: translation, copyable: true)
@@ -154,12 +154,16 @@ private struct SessionView: View {
                     Label("Explain", systemImage: "graduationcap")
                 }
             }
-            if session.explanationError != nil {
-                FailureCard(model: model, session: session, message: session.explanationError!)
+            if let error = session.explanationError {
+                FailureCard(model: model, session: session, config: session.explanationBackend ?? session.backend, message: error)
             }
         } else {
             VStack(alignment: .leading, spacing: 6) {
-                SectionTitle("Explanation")
+                if let other = session.explanationBackend, other.id != session.backendID {
+                    SectionTitle("Explanation · \(other.name)")
+                } else {
+                    SectionTitle("Explanation")
+                }
                 MarkdownText(markdown: Prompts.visibleText(session.explanation))
                 if session.isExplaining { ProgressView().controlSize(.small) }
                 if let error = session.explanationError, !session.explanation.isEmpty {
@@ -479,11 +483,13 @@ private struct CopyButton: View {
 private struct FailureCard: View {
     let model: AppModel
     let session: LookupSession
+    /// The Backend that failed.
+    let config: BackendConfig
     let message: String
 
     var body: some View {
-        let status = model.statuses[session.backendID]
-        let alternatives = model.settings.backends.filter { $0.id != session.backendID && model.statuses[$0.id]?.isReady == true }
+        let status = model.statuses[config.id]
+        let alternatives = model.settings.backends.filter { $0.id != config.id && model.statuses[$0.id]?.isReady == true }
         VStack(alignment: .leading, spacing: 8) {
             Label(status.map { $0.isReady ? message : $0.message } ?? message, systemImage: "exclamationmark.triangle")
                 .foregroundStyle(.orange)

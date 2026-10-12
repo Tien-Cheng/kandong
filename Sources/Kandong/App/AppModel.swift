@@ -13,6 +13,9 @@ final class AppModel {
     var settings: AppSettings {
         didSet {
             guard settings != oldValue else { return }
+            // e.g. a Local backend whose URL now points off this Mac stops being the Local one.
+            let normalized = settings.normalized()
+            if normalized != settings { settings = normalized }
             saveSettings()
             applySettings(previous: oldValue)
         }
@@ -27,6 +30,8 @@ final class AppModel {
     var session: LookupSession?
     /// Last known readiness of each Backend, by id.
     private(set) var statuses: [String: BackendStatus] = [:]
+    /// Bumped per Backend on each check, so a slow old check can't overwrite a newer result.
+    @ObservationIgnored private var statusChecks: [String: Int] = [:]
 
     @ObservationIgnored private var analyzerTask: Task<OfflineAnalyzer?, Never>?
     @ObservationIgnored private var hotkeys: HotkeyCenter!
@@ -131,12 +136,16 @@ final class AppModel {
     /// Checks every Backend (or one) and remembers whether it can answer.
     func refreshStatuses(only id: String? = nil) async {
         let configs = settings.backends.filter { id == nil || $0.id == id }
-        await withTaskGroup(of: (String, BackendStatus).self) { group in
+        await withTaskGroup(of: (String, Int, BackendStatus).self) { group in
             for config in configs {
                 let backend = backend(for: config)
-                group.addTask { (config.id, await backend.status()) }
+                let check = (statusChecks[config.id] ?? 0) + 1
+                statusChecks[config.id] = check
+                group.addTask { (config.id, check, await backend.status()) }
             }
-            for await (id, status) in group { statuses[id] = status }
+            for await (id, check, status) in group where statusChecks[id] == check && settings.backend(id: id) != nil {
+                statuses[id] = status
+            }
         }
     }
 
@@ -174,10 +183,17 @@ final class AppModel {
         }
     }
 
+    /// Moves keys to their new accounts, deleting an old one only once the new one reads back.
     private static func moveLegacyKeychainAccounts() {
         for (old, new) in legacyKeychainAccounts {
-            guard Keychain.read(new) == nil, let key = Keychain.read(old) else { continue }
-            Keychain.write(key, for: new)
+            guard let key = Keychain.read(old) else { continue }
+            if Keychain.read(new) == key {
+                Keychain.write("", for: old)
+                continue
+            }
+            // Something else is there, or the Keychain can't say: leave both alone.
+            guard Keychain.contains(new) == false else { continue }
+            guard Keychain.write(key, for: new), Keychain.read(new) == key else { continue }
             Keychain.write("", for: old)
         }
     }
@@ -229,7 +245,7 @@ final class AppModel {
         session?.cancel()
         let session = LookupSession(source: source)
         if config.type == .appleIntelligence { AppleIntelligenceBackend.prewarm() }
-        session.backendID = config.id
+        session.backend = config
         session.backendLabel = backend(for: config).label
         session.backendIsLocal = config.isOnDevice
         self.session = session
@@ -243,10 +259,11 @@ final class AppModel {
         panel.show(near: CGRect(origin: anchor, size: .zero))
     }
 
-    private func lookup(image: Data, source: LookupSource, config: BackendConfig, anchor: CGRect) {
+    private func lookup(image: Data, source: LookupSource, config: BackendConfig, anchor: CGRect?) {
         let session = startSession(source: source, config: config)
+        session.image = image
         session.status = .readingImage
-        panel.show(near: anchor)
+        if let anchor { panel.show(near: anchor) } else { panel.show(near: nil) }
         let backend = backend(for: config)
         session.tasks.append(Task {
             let png = ImageData.normalized(image)
@@ -308,12 +325,21 @@ final class AppModel {
         run(session, text: text, config: config)
     }
 
-    /// Looks the same text up again with another Backend, once; settings stay as they are.
+    /// Looks the same thing up again with another Backend, once; settings stay as they are.
     func retry(_ session: LookupSession, with config: BackendConfig) {
         if case .failed = session.status {
-            lookup(text: session.sourceText, source: session.source, config: config)
+            lookUpAgain(session, with: config)
         } else if session.explanationError != nil {
             explain(session, with: config)
+        } else {
+            lookUpAgain(session, with: config)
+        }
+    }
+
+    private func lookUpAgain(_ session: LookupSession, with config: BackendConfig) {
+        // Still reading an image (or it had no text yet): read it again with the new Backend.
+        if session.sourceText.isEmpty, let image = session.image {
+            lookup(image: image, source: session.source, config: config, anchor: nil)
         } else {
             lookup(text: session.sourceText, source: session.source, config: config)
         }
@@ -378,7 +404,11 @@ final class AppModel {
     /// Explains the text, or for a text too long for the Backend, its next part.
     func explain(_ session: LookupSession, with config: BackendConfig? = nil) {
         guard !session.isExplaining, let engine else { return }
-        let backend = backend(for: config ?? settings.backend(id: session.backendID) ?? settings.backend(local: false))
+        if let config { session.explanationBackend = config }
+        // The Backend this Lookup used (its current settings if it still exists), never a silent
+        // switch to another one: a Local Lookup's text must stay on this Mac.
+        let chosen = session.explanationBackend ?? session.backend
+        let backend = backend(for: settings.backend(id: chosen.id) ?? chosen)
         session.isExplaining = true
         session.explanationError = nil
         let translation = session.direction == .learn ? session.translation : session.sourceText
