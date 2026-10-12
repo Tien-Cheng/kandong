@@ -159,6 +159,12 @@ struct CorrectionTests {
         #expect(try Prompts.parseLearn(reply).translation == "Hello")
     }
 
+    @Test func keepsStreamedDeltasInOrder() async throws {
+        let backend = CodexBackend(settings: CodexSettings(), server: try await server())
+        let reply = try await backend.complete(AIRequest(system: "s", user: "MANY"))
+        #expect(reply == (0..<300).map { "\($0)," }.joined())
+    }
+
     @Test func surfacesFailedTurns() async throws {
         let backend = CodexBackend(settings: CodexSettings(), server: try await server())
         await #expect(throws: BackendError.failed("boom")) {

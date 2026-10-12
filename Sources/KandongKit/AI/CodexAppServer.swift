@@ -40,6 +40,7 @@ public actor CodexAppServer {
     private var stderrTail = ""
     private var cachedModels: [CodexModel]?
     private var starting: Task<Void, Error>?
+    private var reader: Task<Void, Never>?
 
     public init() {}
 
@@ -87,6 +88,8 @@ public actor CodexAppServer {
         if let process, process.isRunning { process.terminate() }
         process = nil
         stdin = nil
+        reader?.cancel()
+        reader = nil
         buffer = Data()
         failAll(BackendError.failed("Codex app-server stopped."))
     }
@@ -104,10 +107,12 @@ public actor CodexAppServer {
         process.standardInput = input
         process.standardOutput = output
         process.standardError = errors
-        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        // One consumer reads stdout in order; a Task per chunk could reach the actor out of order and
+        // scramble streamed replies.
+        let (chunks, sink) = AsyncStream.makeStream(of: Data.self)
+        output.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            guard let self, !data.isEmpty else { return }
-            Task { await self.receive(data) }
+            if data.isEmpty { sink.finish() } else { sink.yield(data) }
         }
         errors.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
@@ -123,6 +128,11 @@ public actor CodexAppServer {
         try process.run()
         self.process = process
         self.stdin = input.fileHandleForWriting
+        reader = Task { [weak self] in
+            for await data in chunks {
+                await self?.receive(data, from: process)
+            }
+        }
     }
 
     private func processExited(_ finished: Process) {
@@ -166,7 +176,8 @@ public actor CodexAppServer {
         }
     }
 
-    private func receive(_ data: Data) {
+    private func receive(_ data: Data, from source: Process) {
+        guard source === process else { return }
         buffer.append(data)
         while let newline = buffer.firstIndex(of: 0x0A) {
             let line = buffer[buffer.startIndex..<newline]
