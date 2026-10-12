@@ -108,22 +108,31 @@ public actor CodexAppServer {
         process.standardOutput = output
         process.standardError = errors
         // One consumer reads stdout in order; a Task per chunk could reach the actor out of order and
-        // scramble streamed replies.
+        // scramble streamed replies. The exit is handled after stdout is drained, so a reply written
+        // just before exiting still arrives.
         let (chunks, sink) = AsyncStream.makeStream(of: Data.self)
         output.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            if data.isEmpty { sink.finish() } else { sink.yield(data) }
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                sink.finish()
+            } else {
+                sink.yield(data)
+            }
         }
         errors.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            guard let self, !data.isEmpty else { return }
+            guard !data.isEmpty else { return handle.readabilityHandler = nil }
+            guard let self else { return }
             Task { await self.receiveStderr(data) }
         }
         process.terminationHandler = { [weak self] finished in
-            output.fileHandleForReading.readabilityHandler = nil
-            errors.fileHandleForReading.readabilityHandler = nil
-            guard let self else { return }
-            Task { await self.processExited(finished) }
+            // Normally stdout reaches end-of-file and the reader reports the exit; this covers a
+            // child process that keeps the pipe open.
+            Task {
+                try? await Task.sleep(for: .seconds(2))
+                await self?.processExited(finished)
+            }
         }
         try process.run()
         self.process = process
@@ -132,11 +141,14 @@ public actor CodexAppServer {
             for await data in chunks {
                 await self?.receive(data, from: process)
             }
+            await self?.processExited(process)
         }
     }
 
     private func processExited(_ finished: Process) {
         guard finished === process else { return }
+        reader?.cancel()
+        reader = nil
         ready = false
         process = nil
         stdin = nil

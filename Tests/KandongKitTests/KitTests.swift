@@ -186,6 +186,14 @@ struct CorrectionTests {
         #expect(reply == (0..<300).map { "\($0)," }.joined())
     }
 
+    @Test func deliversTheLastReplyBeforeAnExit() async throws {
+        for _ in 0..<5 {
+            let backend = CodexBackend(settings: CodexSettings(), server: try await server())
+            let reply = try await backend.complete(AIRequest(system: "s", user: "EXIT"))
+            #expect(reply.count == 200000)
+        }
+    }
+
     @Test func surfacesFailedTurns() async throws {
         let backend = CodexBackend(settings: CodexSettings(), server: try await server())
         await #expect(throws: BackendError.failed("boom")) {
