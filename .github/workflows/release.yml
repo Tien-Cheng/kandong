@@ -72,6 +72,9 @@ jobs:
           sha="$(shasum -a 256 "$ZIP" | cut -d' ' -f1)"
           cd homebrew-tap
           sed -i '' -E "s/^  version \".*\"/  version \"$version\"/; s/^  sha256 \".*\"/  sha256 \"$sha\"/" Casks/kandong.rb
+          # Builds need macOS 27 (Apple Intelligence's Foundation Models) and translate out of the box.
+          sed -i '' -E "s/^  depends_on macos: .*/  depends_on macos: :golden_gate/" Casks/kandong.rb
+          sed -i '' -E "s/^    Translations need the Codex CLI.*/    Translations use Apple Intelligence (turn it on in System Settings); Codex and LM Studio also work./" Casks/kandong.rb
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -am "kandong $version"
