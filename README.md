@@ -48,7 +48,7 @@ All shortcuts can be changed in Settings. Esc closes the panel, 📌 keeps it op
 
 ## AI backends
 
-- **Apple Intelligence** (default) runs Apple's on-device model: nothing to install or sign in to, and text stays on this Mac. Turn it on in System Settings → Apple Intelligence & Siri. It reads screenshots itself.
+- **Apple Intelligence** (default) runs Apple's on-device model: nothing to install or sign in to, and text stays on this Mac. Turn it on in System Settings → Apple Intelligence & Siri. It reads screenshots itself; text too long for it is translated in parts.
 - **Codex** uses your ChatGPT subscription through the installed `codex` CLI (`codex app-server`). Sign in once with `codex login`.
 - **LM Studio** runs fully on this Mac. Start its server (`lms server start`) and pick a model in Settings. Vision models are detected automatically, so screenshots go to the model; for text-only models, Kandong reads images with Apple's on-device OCR.
 - **Other OpenAI-compatible servers** (Ollama, hosted APIs): set a URL, model and optional key (stored in the Keychain).

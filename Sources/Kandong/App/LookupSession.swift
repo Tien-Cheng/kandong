@@ -34,9 +34,20 @@ final class LookupSession: Identifiable {
     /// Message shown instead of a Result (e.g. "No selection").
     var message: String?
 
+    /// Set while a text too long for the Backend is translated in parts.
+    var progress: LookupProgress?
+
     var explanation = ""
     var isExplaining = false
     var explanationError: String?
+    /// A long text is explained one part at a time; empty until the first Explain.
+    var explanationParts: [String] = []
+    var explainedParts = 0
+
+    /// Whether some of a long text is still to be explained.
+    var hasMoreToExplain: Bool {
+        !isExplaining && explainedParts > 0 && explainedParts < explanationParts.count
+    }
 
     @ObservationIgnored var tasks: [Task<Void, Never>] = []
 

@@ -278,7 +278,10 @@ final class AppModel {
                 session.analysis = analysis
                 countEncounters(in: analysis)
                 do {
-                    let (translation, corrected) = try await engine.learn(analysis, backend: backend)
+                    let (translation, corrected) = try await engine.learn(analysis, backend: backend) { progress in
+                        await MainActor.run { session.progress = progress }
+                    }
+                    session.progress = nil
                     guard !Task.isCancelled else { return }
                     session.analysis = corrected
                     session.translation = translation
@@ -291,7 +294,10 @@ final class AppModel {
                 }
             } else {
                 do {
-                    let (reply, analysis) = try await engine.reverse(text, backend: backend)
+                    let (reply, analysis) = try await engine.reverse(text, backend: backend) { progress in
+                        await MainActor.run { session.progress = progress }
+                    }
+                    session.progress = nil
                     guard !Task.isCancelled else { return }
                     session.analysis = analysis
                     session.translation = reply.chinese
@@ -306,20 +312,40 @@ final class AppModel {
         })
     }
 
+    /// Explains the text, or for a text too long for the Backend, its next part.
     func explain(_ session: LookupSession, local: Bool? = nil) {
         guard !session.isExplaining, let engine else { return }
         let backend = backend(local: local ?? session.usesLocalBackend)
         session.isExplaining = true
-        session.explanation = ""
         session.explanationError = nil
         let translation = session.direction == .learn ? session.translation : session.sourceText
         session.tasks.append(Task {
-            do {
-                for try await delta in engine.explain(session.chineseText, translation: translation, backend: backend) {
-                    session.explanation += delta
+            if session.explanationParts.isEmpty {
+                session.explanation = ""
+                session.explanationParts = await engine.explanationParts(session.chineseText, translation: translation, backend: backend)
+            }
+            while session.explainedParts < session.explanationParts.count {
+                let parts = session.explanationParts
+                let index = session.explainedParts
+                let before = session.explanation
+                if parts.count > 1 {
+                    session.explanation += (index > 0 ? "\n\n---\n\n" : "") + "**Part \(index + 1) of \(parts.count)**\n\n"
                 }
-            } catch {
-                if !Task.isCancelled { session.explanationError = error.localizedDescription }
+                do {
+                    let reference = parts.count == 1 ? translation : nil
+                    for try await delta in engine.explain(parts[index], translation: reference, backend: backend) {
+                        session.explanation += delta
+                    }
+                    session.explainedParts += 1
+                } catch BackendError.contextTooLong where parts.count == 1 {
+                    // A Backend that can't measure only finds out by trying; explain it in halves.
+                    session.explanation = before
+                    session.explanationParts = engine.halvesToExplain(parts[0])
+                    continue
+                } catch {
+                    if !Task.isCancelled { session.explanationError = error.localizedDescription }
+                }
+                break
             }
             session.isExplaining = false
         })
