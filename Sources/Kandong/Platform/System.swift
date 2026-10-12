@@ -36,14 +36,28 @@ enum Keychain {
         return String(data: data, encoding: .utf8)
     }
 
-    static func write(_ value: String, for account: String) {
+    /// Whether the account has a key; nil when the Keychain can't say (e.g. access was denied).
+    static func contains(_ account: String) -> Bool? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account,
         ]
-        SecItemDelete(query as CFDictionary)
-        guard !value.isEmpty else { return }
+        switch SecItemCopyMatching(query as CFDictionary, nil) {
+        case errSecSuccess: return true
+        case errSecItemNotFound: return false
+        default: return nil
+        }
+    }
+
+    /// Stores the key, or deletes it when empty; false if the Keychain refused.
+    @discardableResult
+    static func write(_ value: String, for account: String) -> Bool {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account,
+        ]
+        let deleted = SecItemDelete(query as CFDictionary)
+        guard !value.isEmpty else { return deleted == errSecSuccess || deleted == errSecItemNotFound }
         var attributes = query
         attributes[kSecValueData as String] = Data(value.utf8)
-        SecItemAdd(attributes as CFDictionary, nil)
+        return SecItemAdd(attributes as CFDictionary, nil) == errSecSuccess
     }
 }

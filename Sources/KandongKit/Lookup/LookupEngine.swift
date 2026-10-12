@@ -61,13 +61,15 @@ public struct ExplanationParts: Equatable, Sendable {
     }
 }
 
-/// How far a Lookup has got when its text is sent in parts.
+/// How far a Lookup's Translation has got.
 public struct LookupProgress: Equatable, Sendable {
     public var completedParts: Int
-    /// Nil while the Backend is still finding out how small the parts must be.
+    /// 1 unless the text is sent in parts; nil while the Backend is still finding out how small the parts must be.
     public var totalParts: Int?
-    /// The Translation of the parts done so far.
+    /// The Translation so far, including the part still coming in.
     public var translation: String
+
+    public var isInParts: Bool { totalParts != 1 }
 }
 
 public typealias ProgressHandler = @Sendable (LookupProgress) async -> Void
@@ -108,9 +110,9 @@ public struct LookupEngine: Sendable {
                 if Self.isUntranslated(english: parsed.translation, source: part) { throw BackendError.untranslated }
                 return parsed
             },
-            progress: { replies, total in
+            progress: { replies, total, current in
                 await progress?(LookupProgress(completedParts: replies.count, totalParts: total,
-                                               translation: Self.join(replies.map { ($0.text, $0.reply.translation) }, separator: " ")))
+                                               translation: Self.join(replies.map { ($0.text, $0.reply.translation) }, separator: " ", then: current)))
             }
         )
         let translation = Self.join(parts.map { ($0.text, $0.reply.translation) }, separator: " ")
@@ -130,9 +132,9 @@ public struct LookupEngine: Sendable {
                 if !parsed.chinese.containsHan, Self.needsTranslation(english: part) { throw BackendError.untranslated }
                 return parsed
             },
-            progress: { replies, total in
+            progress: { replies, total, current in
                 await progress?(LookupProgress(completedParts: replies.count, totalParts: total,
-                                               translation: Self.join(replies.map { ($0.text, $0.reply.chinese) }, separator: "")))
+                                               translation: Self.join(replies.map { ($0.text, $0.reply.chinese) }, separator: "", then: current)))
             }
         )
         let reply = ReverseReply(
@@ -191,15 +193,32 @@ public struct LookupEngine: Sendable {
         steps: [PromptStep],
         request: (_ part: String, _ preceding: String?, PromptStep) -> AIRequest,
         parse: (_ reply: String, _ part: String) throws -> Reply,
-        progress: (_ done: [(text: String, reply: Reply)], _ total: Int?) async -> Void
+        progress: (_ done: [(text: String, reply: Reply)], _ total: Int?, _ current: String?) async -> Void
     ) async throws -> [(text: String, reply: Reply)] {
+        var done: [(text: String, reply: Reply)] = []
+        var total: Int? = 1
+
+        // Sends one request, reporting the reply's `streamField` as it comes in.
+        func ask(_ request: AIRequest, part: String) async throws -> Reply {
+            var reply = ""
+            var shown: String?
+            for try await snapshot in backend.snapshots(of: request) {
+                reply = snapshot
+                guard let field = request.streamField,
+                      let partial = PartialJSON.stringValue(of: field, in: Prompts.visibleText(snapshot)), partial != shown else { continue }
+                shown = partial
+                await progress(done, total, partial)
+            }
+            return try parse(reply, part)
+        }
+
         var step = steps[steps.count - 1]
         var untranslated = false
         trying: for candidate in steps {
             let whole = request(text, nil, candidate)
             if await backend.fits(whole) == false { continue }
             do {
-                return [(text, try parse(try await backend.complete(whole), text))]
+                return [(text, try await ask(whole, part: text))]
             } catch BackendError.contextTooLong {
                 continue
             } catch BackendError.untranslated {
@@ -209,17 +228,15 @@ public struct LookupEngine: Sendable {
                 break trying
             }
         }
-        var done: [(text: String, reply: Reply)] = []
-        var total: Int?
 
         // Sends one part; if it still doesn't fit (or the Backend can't measure), halves it.
         func send(_ units: [String], preceding: String?) async throws {
             try Task.checkCancellation()
             let part = units.joined()
             do {
-                let reply = try parse(try await backend.complete(request(part, preceding, step)), part)
-                done.append((part, reply))
-                await progress(done, total.map { max($0, done.count) })
+                done.append((part, try await ask(request(part, preceding, step), part: part)))
+                total = total.map { max($0, done.count) }
+                await progress(done, total, nil)
             } catch let error as BackendError where error == .contextTooLong || error == .untranslated {
                 total = total.map { $0 + 1 }
                 try await split(units, preceding: preceding, error: error)
@@ -236,7 +253,8 @@ public struct LookupEngine: Sendable {
 
         guard !untranslated, await backend.fits(request(text, nil, step)) != nil else {
             // The Backend already failed on the whole text; start from its halves.
-            await progress(done, nil)
+            total = nil
+            await progress(done, total, nil)
             try await split(TextChunker.sentences(text), preceding: nil, error: untranslated ? .untranslated : .contextTooLong)
             return done
         }
@@ -244,7 +262,7 @@ public struct LookupEngine: Sendable {
             await backend.fits(request(part, preceding, step)) ?? true
         }) else { throw BackendError.contextTooLong }
         total = pieces.count
-        await progress(done, total)
+        await progress(done, total, nil)
         for piece in pieces {
             try await send(TextChunker.sentences(piece.text), preceding: piece.preceding)
         }
@@ -286,16 +304,17 @@ public struct LookupEngine: Sendable {
         return units.count / 2
     }
 
-    /// Joins the replies for consecutive parts, keeping the source's line breaks between them.
-    static func join(_ parts: [(source: String, reply: String)], separator: String) -> String {
+    /// Joins the replies for consecutive parts, keeping the source's line breaks between them, then
+    /// the part still coming in.
+    static func join(_ parts: [(source: String, reply: String)], separator: String, then current: String? = nil) -> String {
         var result = ""
         for (index, part) in parts.enumerated() {
             result += part.reply.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard index < parts.count - 1 else { break }
+            guard index < parts.count - 1 || current != nil else { break }
             let gap = part.source.reversed().prefix { $0.isWhitespace }
             result += gap.contains(where: \.isNewline) ? "\n" : separator
         }
-        return result
+        return result + (current ?? "")
     }
 
     /// Reads the text in an image with the Backend's vision model.
