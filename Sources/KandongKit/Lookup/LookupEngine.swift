@@ -45,7 +45,8 @@ public struct LookupEngine: Sendable {
     public func learn(_ analysis: OfflineAnalysis, backend: AIBackend) async throws -> (translation: String, analysis: OfflineAnalysis) {
         let text = analysis.source
         let request = Prompts.learn(
-            text: text, analysis: analysis, context: workspace.context(), terms: workspace.matchingTerms(in: text)
+            text: text, analysis: analysis, context: workspace.context(), terms: workspace.matchingTerms(in: text),
+            askForReadings: backend.correctsReadings
         )
         let reply = try Prompts.parseLearn(try await backend.complete(request))
         return (reply.translation, applyCorrections(reply.readingCorrections, to: analysis))

@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "Kandong",
-    platforms: [.macOS(.v26)],
+    platforms: [.macOS("27.0")],
     products: [
         .executable(name: "Kandong", targets: ["Kandong"]),
         .library(name: "KandongKit", targets: ["KandongKit"]),

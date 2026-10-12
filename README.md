@@ -13,7 +13,7 @@ Highlight English instead and it shows how to say it in Chinese. See [GLOSSARY.m
 
 ## Install
 
-Needs macOS 26+.
+Needs macOS 27+. Translation works out of the box with Apple Intelligence (turn it on in System Settings → Apple Intelligence & Siri).
 
 ```sh
 brew install --cask tien-cheng/tap/kandong
@@ -48,7 +48,8 @@ All shortcuts can be changed in Settings. Esc closes the panel, 📌 keeps it op
 
 ## AI backends
 
-- **Codex** (default) uses your ChatGPT subscription through the installed `codex` CLI (`codex app-server`). Sign in once with `codex login`.
+- **Apple Intelligence** (default) runs Apple's on-device model: nothing to install or sign in to, and text stays on this Mac. Turn it on in System Settings → Apple Intelligence & Siri. It reads screenshots itself.
+- **Codex** uses your ChatGPT subscription through the installed `codex` CLI (`codex app-server`). Sign in once with `codex login`.
 - **LM Studio** runs fully on this Mac. Start its server (`lms server start`) and pick a model in Settings. Vision models are detected automatically, so screenshots go to the model; for text-only models, Kandong reads images with Apple's on-device OCR.
 - **Other OpenAI-compatible servers** (Ollama, hosted APIs): set a URL, model and optional key (stored in the Keychain).
 

@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: macos-26
+    runs-on: xcode-27
     steps:
       - uses: actions/checkout@v5
         with:
@@ -50,7 +50,7 @@ jobs:
 
           Updating: quit Kandong and replace the app. Permissions carry over between releases.
 
-          Needs macOS 26+. For translations, sign in to the [Codex CLI](https://github.com/openai/codex) (`codex login`) or run [LM Studio](https://lmstudio.ai).
+          Needs macOS 27+. Translations use Apple Intelligence on this Mac by default; you can also use the [Codex CLI](https://github.com/openai/codex) (`codex login`) or [LM Studio](https://lmstudio.ai).
           NOTES
           prerelease=()
           [[ "$GITHUB_REF_NAME" == *-* ]] && prerelease=(--prerelease)

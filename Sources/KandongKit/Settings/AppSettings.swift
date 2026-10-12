@@ -1,6 +1,7 @@
 import Foundation
 
 public enum BackendKind: String, Codable, CaseIterable, Sendable, Identifiable {
+    case appleIntelligence
     case codex
     case lmStudio
     case custom
@@ -9,6 +10,7 @@ public enum BackendKind: String, Codable, CaseIterable, Sendable, Identifiable {
 
     public var displayName: String {
         switch self {
+        case .appleIntelligence: "Apple Intelligence"
         case .codex: "Codex"
         case .lmStudio: "LM Studio"
         case .custom: "OpenAI-compatible"
@@ -16,7 +18,7 @@ public enum BackendKind: String, Codable, CaseIterable, Sendable, Identifiable {
     }
 
     /// Backends that run on this Mac and may be used as the Local backend.
-    public static let localCandidates: [BackendKind] = [.lmStudio, .custom]
+    public static let localCandidates: [BackendKind] = [.appleIntelligence, .lmStudio, .custom]
 }
 
 /// Whether an OpenAI-compatible model can read images.
@@ -86,8 +88,8 @@ public enum HotkeyAction: String, Codable, CodingKeyRepresentable, CaseIterable,
 }
 
 public struct AppSettings: Codable, Hashable, Sendable {
-    public var defaultBackend: BackendKind = .codex
-    public var localBackend: BackendKind = .lmStudio
+    public var defaultBackend: BackendKind = .appleIntelligence
+    public var localBackend: BackendKind = .appleIntelligence
     public var codex = CodexSettings()
     public var lmStudio = OpenAISettings(baseURL: "http://localhost:1234/v1")
     public var custom = OpenAISettings(baseURL: "http://localhost:11434/v1")
@@ -115,7 +117,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
 
     public func openAISettings(for kind: BackendKind) -> OpenAISettings? {
         switch kind {
-        case .codex: nil
+        case .appleIntelligence, .codex: nil
         case .lmStudio: lmStudio
         case .custom: custom
         }

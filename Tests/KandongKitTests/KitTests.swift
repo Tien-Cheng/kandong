@@ -82,6 +82,15 @@ import Testing
         #expect(request.schema != nil)
     }
 
+    @Test func translationOnlyLeavesOutReadings() throws {
+        let analysis = OfflineAnalysis(source: "微信", segments: [Segment(id: 0, kind: .word, text: "微信", original: "微信", syllables: [Syllable(text: "wēi", tone: 1), Syllable(text: "xìn", tone: 4)])])
+        let request = Prompts.learn(text: "微信", analysis: analysis, context: "", terms: [], askForReadings: false)
+        #expect(!request.user.contains("[wēi xìn]"))
+        #expect(!request.system.contains("readingCorrections"))
+        #expect(request.schema == Prompts.translationSchema)
+        #expect(try Prompts.parseLearn(#"{"translation": "WeChat"}"#).readingCorrections.isEmpty)
+    }
+
     @Test func directionFollowsScript() {
         #expect(Direction.of("good morning") == .reverse)
         #expect(Direction.of("OK明白") == .learn)
@@ -134,6 +143,18 @@ struct CorrectionTests {
         #expect(settings.codex.effort == "low")
         #expect(settings.hotkeys[.captureScreen] == AppSettings.defaultHotkeys[.captureScreen])
         #expect(settings.tapKey == .rightCommand)
+    }
+
+    @Test func freshInstallsUseAppleIntelligence() throws {
+        let settings = try JSONDecoder().decode(AppSettings.self, from: Data("{}".utf8))
+        #expect(settings.defaultBackend == .appleIntelligence)
+        #expect(settings.localBackend == .appleIntelligence)
+    }
+
+    @Test func keepsExistingBackendChoices() throws {
+        let settings = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"defaultBackend": "codex", "localBackend": "lmStudio"}"#.utf8))
+        #expect(settings.defaultBackend == .codex)
+        #expect(settings.localBackend == .lmStudio)
     }
 
     @Test func roundTrips() throws {
