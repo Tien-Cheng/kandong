@@ -7,6 +7,7 @@ struct SettingsView: View {
     var body: some View {
         Form {
             backendSection
+            AppleIntelligenceSection(model: model)
             CodexSection(model: model)
             OpenAISection(model: model, kind: .lmStudio)
             OpenAISection(model: model, kind: .custom)
@@ -101,6 +102,54 @@ struct SettingsView: View {
         panel.canCreateDirectories = true
         if panel.runModal() == .OK, let url = panel.url {
             model.settings.workspacePath = (url.path as NSString).abbreviatingWithTildeInPath
+        }
+    }
+}
+
+// MARK: - Apple Intelligence
+
+private struct AppleIntelligenceSection: View {
+    @Bindable var model: AppModel
+    @ViewState private var status = ""
+    @ViewState private var testing = false
+
+    var body: some View {
+        Section {
+            LabeledContent("Status") {
+                HStack {
+                    Text(availabilityText).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled)
+                    Spacer()
+                    if let reason = AppleIntelligenceBackend.unavailability, reason != .deviceNotEligible {
+                        Button("Open Settings") { NSWorkspace.shared.open(AppleIntelligenceUnavailability.settingsURL) }
+                    }
+                    Button(testing ? "Testing…" : "Test", action: test).disabled(testing)
+                }
+            }
+        } header: {
+            Text("Apple Intelligence")
+        } footer: {
+            Text("Apple's model on this Mac: nothing to install or sign in to, and text never leaves this Mac. Needs Apple Intelligence turned on in System Settings.")
+        }
+    }
+
+    private var availabilityText: String {
+        if !status.isEmpty { return status }
+        return AppleIntelligenceBackend.unavailability?.message ?? "Ready"
+    }
+
+    private func test() {
+        testing = true
+        Task {
+            let started = Date()
+            do {
+                let reply = try await model.backend(for: .appleIntelligence).complete(AIRequest(
+                    system: "Translate to English. Reply with the translation only.", user: "你好，世界"
+                ))
+                status = "OK in \(String(format: "%.1f", Date().timeIntervalSince(started)))s: \(reply)"
+            } catch {
+                status = error.localizedDescription
+            }
+            testing = false
         }
     }
 }

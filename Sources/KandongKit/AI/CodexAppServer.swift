@@ -40,6 +40,7 @@ public actor CodexAppServer {
     private var stderrTail = ""
     private var cachedModels: [CodexModel]?
     private var starting: Task<Void, Error>?
+    private var reader: Task<Void, Never>?
 
     public init() {}
 
@@ -87,6 +88,8 @@ public actor CodexAppServer {
         if let process, process.isRunning { process.terminate() }
         process = nil
         stdin = nil
+        reader?.cancel()
+        reader = nil
         buffer = Data()
         failAll(BackendError.failed("Codex app-server stopped."))
     }
@@ -104,29 +107,48 @@ public actor CodexAppServer {
         process.standardInput = input
         process.standardOutput = output
         process.standardError = errors
-        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        // One consumer reads stdout in order; a Task per chunk could reach the actor out of order and
+        // scramble streamed replies. The exit is handled after stdout is drained, so a reply written
+        // just before exiting still arrives.
+        let (chunks, sink) = AsyncStream.makeStream(of: Data.self)
+        output.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            guard let self, !data.isEmpty else { return }
-            Task { await self.receive(data) }
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                sink.finish()
+            } else {
+                sink.yield(data)
+            }
         }
         errors.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            guard let self, !data.isEmpty else { return }
+            guard !data.isEmpty else { return handle.readabilityHandler = nil }
+            guard let self else { return }
             Task { await self.receiveStderr(data) }
         }
         process.terminationHandler = { [weak self] finished in
-            output.fileHandleForReading.readabilityHandler = nil
-            errors.fileHandleForReading.readabilityHandler = nil
-            guard let self else { return }
-            Task { await self.processExited(finished) }
+            // Normally stdout reaches end-of-file and the reader reports the exit; this covers a
+            // child process that keeps the pipe open.
+            Task {
+                try? await Task.sleep(for: .seconds(2))
+                await self?.processExited(finished)
+            }
         }
         try process.run()
         self.process = process
         self.stdin = input.fileHandleForWriting
+        reader = Task { [weak self] in
+            for await data in chunks {
+                await self?.receive(data, from: process)
+            }
+            await self?.processExited(process)
+        }
     }
 
     private func processExited(_ finished: Process) {
         guard finished === process else { return }
+        reader?.cancel()
+        reader = nil
         ready = false
         process = nil
         stdin = nil
@@ -166,7 +188,8 @@ public actor CodexAppServer {
         }
     }
 
-    private func receive(_ data: Data) {
+    private func receive(_ data: Data, from source: Process) {
+        guard source === process else { return }
         buffer.append(data)
         while let newline = buffer.firstIndex(of: 0x0A) {
             let line = buffer[buffer.startIndex..<newline]

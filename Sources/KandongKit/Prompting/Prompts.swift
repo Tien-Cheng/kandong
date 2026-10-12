@@ -56,6 +56,14 @@ public enum Prompts {
         ],
     ]
 
+    /// Learn without reading corrections, for Backends that don't make them.
+    public static let translationSchema: JSONValue = [
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["translation"],
+        "properties": ["translation": ["type": "string"]],
+    ]
+
     public static let reverseSchema: JSONValue = [
         "type": "object",
         "additionalProperties": false,
@@ -63,19 +71,27 @@ public enum Prompts {
         "properties": ["chinese": ["type": "string"], "note": ["type": "string"]],
     ]
 
-    static let learnSystem = """
-    You help an English-speaking learner read Chinese text they came across. \
+    static let learnSystem = learnInstructions + """
     Reply with one JSON object and nothing else:
     {"translation": string, "readingCorrections": [{"word": string, "pinyin": string}]}
-
-    translation: natural, idiomatic English as a native speaker would say it. Keep every non-Chinese \
-    fragment exactly as written (English words, @mentions, hashtags, URLs, numbers). \
-    Use the user's Terms exactly when their Chinese appears. Match the tone (casual chat stays casual).
 
     readingCorrections: the user gives dictionary pinyin for each word. List only words whose \
     pinyin is WRONG in this context (多音字 such as 了, 行, 得, 长, 重, 还, 着, 地). Give the correct \
     pinyin with tone marks, one space between syllables, citation tones (no tone sandhi). \
     Usually this list is empty.
+    """
+
+    static let translateSystem = learnInstructions + """
+    Reply with one JSON object and nothing else: {"translation": string}
+    """
+
+    private static let learnInstructions = """
+    You help an English-speaking learner read Chinese text they came across.
+
+    translation: natural, idiomatic English as a native speaker would say it. You MUST write it in English. Keep \
+    every non-Chinese fragment exactly as written (English words, @mentions, hashtags, URLs, numbers). \
+    Use the user's Terms exactly when their Chinese appears. Match the tone (casual chat stays casual).
+
     """
 
     static let reverseSystem = """
@@ -94,7 +110,8 @@ public enum Prompts {
     - **Grammar**: particles and patterns (了/过/着, 把/被, 是…的, complements, measure words) — what they do here.
     - **Words**: notable words or idioms, with pinyin, nuance and a short example.
     - **Register**: how formal or casual it is, and anything a native would read between the lines.
-    Write pinyin with tone marks. Keep non-Chinese fragments as they are; don't explain them.
+    Write pinyin with tone marks. Keep non-Chinese fragments as they are; don't explain them. \
+    You MUST respond in English.
     """
 
     static let transcribeSystem = """
@@ -114,11 +131,14 @@ public enum Prompts {
         return parts.joined(separator: "\n\n")
     }
 
-    public static func learn(text: String, analysis: OfflineAnalysis, context: String, terms: [Term]) -> AIRequest {
-        let readings = analysis.uniqueWords.map { "\($0.text) [\($0.pinyin)]" }.joined(separator: "\n")
+    /// With `askForReadings` off, the reply has only the Translation.
+    public static func learn(text: String, analysis: OfflineAnalysis, context: String, terms: [Term], askForReadings: Bool = true) -> AIRequest {
         var user = steering(context: context, terms: terms)
         if !user.isEmpty { user += "\n\n" }
-        user += "Text:\n\(text)\n\nDictionary pinyin:\n\(readings)"
+        user += "Text:\n\(text)"
+        guard askForReadings else { return AIRequest(system: translateSystem, user: user, schema: translationSchema) }
+        let readings = analysis.uniqueWords.map { "\($0.text) [\($0.pinyin)]" }.joined(separator: "\n")
+        user += "\n\nDictionary pinyin:\n\(readings)"
         return AIRequest(system: learnSystem, user: user, schema: learnSchema)
     }
 

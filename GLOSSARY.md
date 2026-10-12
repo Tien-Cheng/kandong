@@ -48,7 +48,7 @@ Free-text description of the user and what they read, sent with every AI request
 _Avoid_: Profile, system prompt
 
 **Backend**:
-The AI provider answering a Lookup: *Codex* or an *OpenAI-compatible* endpoint. The *Local backend* is the one used when the user holds ⇧.
+The AI answering a Lookup: *Apple Intelligence* (Apple's model on this Mac), *Codex*, or an *OpenAI-compatible* endpoint. The *Local backend* is the one used when the user holds ⇧.
 _Avoid_: Provider, model
 
 ## Learning

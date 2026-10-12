@@ -23,11 +23,15 @@ public protocol AIBackend: Sendable {
     /// Short label for the panel badge, e.g. "Codex · gpt-6.1-sol".
     var label: String { get }
     func supportsImages() async -> Bool
+    /// Whether to ask this Backend to correct dictionary readings in context (多音字).
+    var correctsReadings: Bool { get }
     /// Streams the reply as text deltas.
     func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error>
 }
 
 extension AIBackend {
+    public var correctsReadings: Bool { true }
+
     /// The whole reply as one string.
     public func complete(_ request: AIRequest) async throws -> String {
         var text = ""
@@ -45,6 +49,11 @@ public enum BackendError: LocalizedError, Equatable {
     case protocolError(String)
     case failed(String)
     case badResponse(String)
+    case appleIntelligenceUnavailable(AppleIntelligenceUnavailability)
+    /// The prompt doesn't fit in the model's context window.
+    case contextTooLong
+    /// The model declined to answer (content guardrails).
+    case refused(name: String)
 
     public var errorDescription: String? {
         switch self {
@@ -64,6 +73,12 @@ public enum BackendError: LocalizedError, Equatable {
             message
         case .badResponse(let message):
             "Couldn't read the AI's answer: \(message)"
+        case .appleIntelligenceUnavailable(let reason):
+            reason.message
+        case .contextTooLong:
+            "The text is too long for this model."
+        case .refused(let name):
+            "\(name) declined this text — try another backend."
         }
     }
 }

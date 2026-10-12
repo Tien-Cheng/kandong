@@ -82,6 +82,15 @@ import Testing
         #expect(request.schema != nil)
     }
 
+    @Test func translationOnlyLeavesOutReadings() throws {
+        let analysis = OfflineAnalysis(source: "微信", segments: [Segment(id: 0, kind: .word, text: "微信", original: "微信", syllables: [Syllable(text: "wēi", tone: 1), Syllable(text: "xìn", tone: 4)])])
+        let request = Prompts.learn(text: "微信", analysis: analysis, context: "", terms: [], askForReadings: false)
+        #expect(!request.user.contains("[wēi xìn]"))
+        #expect(!request.system.contains("readingCorrections"))
+        #expect(request.schema == Prompts.translationSchema)
+        #expect(try Prompts.parseLearn(#"{"translation": "WeChat"}"#).readingCorrections.isEmpty)
+    }
+
     @Test func directionFollowsScript() {
         #expect(Direction.of("good morning") == .reverse)
         #expect(Direction.of("OK明白") == .learn)
@@ -136,6 +145,18 @@ struct CorrectionTests {
         #expect(settings.tapKey == .rightCommand)
     }
 
+    @Test func freshInstallsUseAppleIntelligence() throws {
+        let settings = try JSONDecoder().decode(AppSettings.self, from: Data("{}".utf8))
+        #expect(settings.defaultBackend == .appleIntelligence)
+        #expect(settings.localBackend == .appleIntelligence)
+    }
+
+    @Test func keepsExistingBackendChoices() throws {
+        let settings = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"defaultBackend": "codex", "localBackend": "lmStudio"}"#.utf8))
+        #expect(settings.defaultBackend == .codex)
+        #expect(settings.localBackend == .lmStudio)
+    }
+
     @Test func roundTrips() throws {
         var settings = AppSettings()
         settings.hotkeys[.lookupSelection] = KeyCombo(keyCode: 2, command: true)
@@ -157,6 +178,20 @@ struct CorrectionTests {
         let backend = CodexBackend(settings: CodexSettings(), server: try await server())
         let reply = try await backend.complete(AIRequest(system: "s", user: "你好", schema: Prompts.learnSchema))
         #expect(try Prompts.parseLearn(reply).translation == "Hello")
+    }
+
+    @Test func keepsStreamedDeltasInOrder() async throws {
+        let backend = CodexBackend(settings: CodexSettings(), server: try await server())
+        let reply = try await backend.complete(AIRequest(system: "s", user: "MANY"))
+        #expect(reply == (0..<300).map { "\($0)," }.joined())
+    }
+
+    @Test func deliversTheLastReplyBeforeAnExit() async throws {
+        for _ in 0..<5 {
+            let backend = CodexBackend(settings: CodexSettings(), server: try await server())
+            let reply = try await backend.complete(AIRequest(system: "s", user: "EXIT"))
+            #expect(reply.count == 200000)
+        }
     }
 
     @Test func surfacesFailedTurns() async throws {

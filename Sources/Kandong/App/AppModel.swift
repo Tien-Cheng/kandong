@@ -124,6 +124,7 @@ final class AppModel {
 
     func backend(for kind: BackendKind) -> AIBackend {
         switch kind {
+        case .appleIntelligence: AppleIntelligenceBackend()
         case .codex: CodexBackend(settings: settings.codex)
         case .lmStudio: OpenAICompatibleBackend(kind: .lmStudio, settings: settings.lmStudio)
         case .custom: OpenAICompatibleBackend(kind: .custom, settings: settings.custom, apiKey: Keychain.read(Self.customKeyAccount))
@@ -132,6 +133,7 @@ final class AppModel {
 
     /// Whether text sent to this Backend stays on this Mac.
     func isOnDevice(_ kind: BackendKind) -> Bool {
+        if kind == .appleIntelligence { return true }
         guard let settings = settings.openAISettings(for: kind), let host = URL(string: settings.baseURL)?.host else { return false }
         return ["localhost", "127.0.0.1", "::1", "[::1]"].contains(host)
     }
@@ -182,6 +184,7 @@ final class AppModel {
         session?.cancel()
         let session = LookupSession(source: source)
         let kind = local ? settings.localBackend : settings.defaultBackend
+        if kind == .appleIntelligence { AppleIntelligenceBackend.prewarm() }
         session.backendLabel = backend(for: kind).label
         session.backendIsLocal = isOnDevice(kind)
         session.usesLocalBackend = local

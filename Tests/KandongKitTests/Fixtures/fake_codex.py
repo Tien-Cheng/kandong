@@ -25,8 +25,13 @@ for line in sys.stdin:
         if "FAIL" in text:
             send({"method": "turn/completed", "params": {"threadId": "t1", "turn": {"id": "u1", "status": "failed", "error": {"message": "boom"}}}})
             continue
-        for part in ['{"translation":', '"Hello"}']:
+        parts = [f"{i}," for i in range(300)] if "MANY" in text else ['{"translation":', '"Hello"}']
+        if "EXIT" in text:
+            parts = ["x" * 200000]
+        for part in parts:
             send({"method": "item/agentMessage/delta", "params": {"threadId": "t1", "turnId": "u1", "itemId": "i1", "delta": part}})
         send({"method": "turn/completed", "params": {"threadId": "t1", "turn": {"id": "u1", "status": "completed"}}})
+        if "EXIT" in text:
+            sys.exit(0)  # exit right after the reply, as a crashing or upgraded server might
     elif mid is not None and "method" not in msg:
         pass  # reply to our approval request
