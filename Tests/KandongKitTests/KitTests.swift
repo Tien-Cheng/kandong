@@ -168,6 +168,23 @@ struct CorrectionTests {
                 "a reading the dictionary doesn't have is ignored")
     }
 
+    @Test func correctedReadingTakesThatReadingsMeaning() throws {
+        let analyzer = TestData.analyzer!
+        let engine = LookupEngine(analyzer: analyzer, workspace: Workspace(path: NSTemporaryDirectory()))
+        let analysis = analyzer.analyze("他还没还我钱。")
+        let both = ReadingChoice.all(in: analysis).filter { $0.word == "还" }
+        let first = try #require(both.first), second = try #require(both.last)
+        let chosen = engine.applyReadings([first.key: "hái", second.key: "huán"], to: analysis)
+        let words = chosen.words.filter { $0.text == "还" }
+        #expect(words.first?.definitions.first == "still", "hái means still, not huán's to pay back")
+        #expect(words.last?.definitions.first == "to pay back")
+        #expect(chosen.uniqueWords.filter { $0.text == "还" }.map(\.pinyin) == ["hái", "huán"],
+                "each reading gets its own row in the Word breakdown")
+
+        let corrected = engine.applyCorrections([.init(word: "还", pinyin: "hái")], to: analyzer.analyze("还"))
+        #expect(corrected.words.first?.definitions.first == "still")
+    }
+
     @Test func appliesContextualCorrection() throws {
         let analyzer = TestData.analyzer!
         let engine = LookupEngine(analyzer: analyzer, workspace: Workspace(path: NSTemporaryDirectory()))

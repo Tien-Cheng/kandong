@@ -364,7 +364,7 @@ public struct LookupEngine: Sendable {
                 syllables = aligned
             }
             guard !syllables.isEmpty else { continue }
-            result.segments[index].syllables = syllables
+            result.segments[index] = analyzer.reread(old, as: syllables)
             result.segments[index].readingCorrected = true
             result.segments[index].alternativeReadings = [old.pinyin] + old.alternativeReadings.filter { $0.lowercased() != match.lowercased() }
         }
@@ -385,7 +385,7 @@ public struct LookupEngine: Sendable {
                 && (result.segments[index].text == word || result.segments[index].original == word) {
                 let old = result.segments[index]
                 guard Pinyin.display(syllables).lowercased() != old.pinyin.lowercased() else { continue }
-                result.segments[index].syllables = syllables
+                result.segments[index] = analyzer.reread(old, as: syllables)
                 result.segments[index].readingCorrected = true
                 result.segments[index].alternativeReadings = [old.pinyin] + old.alternativeReadings.filter {
                     $0.lowercased() != Pinyin.display(syllables).lowercased()
