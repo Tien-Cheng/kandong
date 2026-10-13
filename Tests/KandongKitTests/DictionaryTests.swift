@@ -27,7 +27,7 @@ import Testing
     }
 }
 
-@Suite(.enabled(if: TestData.hasDictionary, "run scripts/fetch-data.sh"))
+@Suite(.enabled(if: TestData.hasDictionary, "run scripts/fetch-data.sh"), .timeLimit(.minutes(1)))
 struct OfflineAnalyzerTests {
     let analyzer = TestData.analyzer!
 

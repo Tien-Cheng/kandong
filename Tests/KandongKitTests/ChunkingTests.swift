@@ -130,7 +130,7 @@ private struct EchoOnceBackend: AIBackend {
     }
 }
 
-@Suite(.enabled(if: TestData.hasDictionary, "run scripts/fetch-data.sh"))
+@Suite(.enabled(if: TestData.hasDictionary, "run scripts/fetch-data.sh"), .timeLimit(.minutes(1)))
 struct ChunkingTests {
     static let sentences = (1...12).map { "第\($0)句话说的是今天下午我们一起去图书馆看书。" }
 

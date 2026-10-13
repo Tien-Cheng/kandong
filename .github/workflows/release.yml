@@ -12,6 +12,8 @@ permissions:
 jobs:
   release:
     runs-on: xcode-27
+    # A stalled test otherwise holds the release for GitHub's 6-hour default.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:

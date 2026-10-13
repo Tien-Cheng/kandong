@@ -89,7 +89,7 @@ import Testing
     }
 }
 
-@Suite(.serialized) struct LocalModelTests {
+@Suite(.serialized, .timeLimit(.minutes(1))) struct LocalModelTests {
     static func backend(_ base: String, preset: OpenAIPreset = .lmStudio, model: String = "", timeLimit: Int? = nil) -> OpenAICompatibleBackend {
         var config = BackendConfig.openAI(preset)
         config.openAI = OpenAISettings(baseURL: base)

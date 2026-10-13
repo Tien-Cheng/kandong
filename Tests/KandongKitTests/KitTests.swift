@@ -109,7 +109,7 @@ import Testing
     }
 }
 
-@Suite(.enabled(if: TestData.hasDictionary, "run scripts/fetch-data.sh"))
+@Suite(.enabled(if: TestData.hasDictionary, "run scripts/fetch-data.sh"), .timeLimit(.minutes(1)))
 struct CorrectionTests {
     @Test func offersEachAmbiguousWordItsDictionaryReadings() throws {
         let analysis = TestData.analyzer!.analyze("我还没吃饭，请把书还给我。")
@@ -380,7 +380,7 @@ struct CorrectionTests {
     }
 }
 
-@Suite struct CodexProtocolTests {
+@Suite(.timeLimit(.minutes(1))) struct CodexProtocolTests {
     func server() async throws -> CodexAppServer {
         let script = Bundle.module.url(forResource: "fake_codex", withExtension: "py", subdirectory: "Fixtures")!
         let server = CodexAppServer()
@@ -498,7 +498,7 @@ struct LiveCodexTests {
     }
 }
 
-@Suite(.serialized) struct OpenAICompatibleTests {
+@Suite(.serialized, .timeLimit(.minutes(1))) struct OpenAICompatibleTests {
     /// Starts the fake LM Studio server on a free port; the caller terminates it.
     func startServer(rejectSchema: Bool = false) async throws -> (Process, String) {
         try await FakeLMStudio.start(rejectSchema ? ["--reject-schema"] : [])
