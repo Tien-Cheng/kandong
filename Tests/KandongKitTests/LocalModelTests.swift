@@ -112,7 +112,7 @@ import Testing
         #expect(log[0]["max_tokens"]?.number != nil, "a model that won't think gets a cap")
         #expect(log[2]["reasoning_effort"]?.isNull ?? true, "a model that can't think isn't told how much to")
         #expect(log[2]["max_tokens"]?.number != nil)
-        #expect(!Self.backend(base).correctsReadings, "local models leave readings to the dictionary")
+        #expect(Self.backend(base).readingMode == .choose, "local models choose among the dictionary's readings by default")
     }
 
     @Test func hostedBackendsKeepTheirModelsDefault() async throws {

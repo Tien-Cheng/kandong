@@ -104,17 +104,17 @@ struct SnapshotDeltas {
 public struct AppleIntelligenceBackend: AIBackend {
     public let label = BackendConfig.appleIntelligence.name
 
-    /// The on-device model misses most 多音字 and sometimes "corrects" a right reading into a wrong
-    /// one (see `KandongEval`), so it only translates and the dictionary readings stand.
-    public let correctsReadings = false
+    public let readingMode: ReadingMode
     let client: AppleModelClient
 
-    public init() {
+    public init(readingMode: ReadingMode = BackendConfig.appleIntelligence.readingMode) {
         client = .live
+        self.readingMode = readingMode
     }
 
-    init(client: AppleModelClient) {
+    init(client: AppleModelClient, readingMode: ReadingMode = .off) {
         self.client = client
+        self.readingMode = readingMode
     }
 
     /// Nil when the model can answer, else why not.
@@ -291,7 +291,11 @@ public struct AppleIntelligenceBackend: AIBackend {
         case "array":
             guard let items = json["items"] else { throw BackendError.failed("Schema array \(name) has no items") }
             return DynamicGenerationSchema(arrayOf: try dynamicSchema(from: items, name: items["title"]?.string ?? "\(name)_item"))
-        case "string": return DynamicGenerationSchema(type: String.self)
+        case "string":
+            if let options = json["enum"]?.array?.compactMap(\.string), !options.isEmpty {
+                return DynamicGenerationSchema(name: name, anyOf: options)
+            }
+            return DynamicGenerationSchema(type: String.self)
         case "number": return DynamicGenerationSchema(type: Double.self)
         case "integer": return DynamicGenerationSchema(type: Int.self)
         case "boolean": return DynamicGenerationSchema(type: Bool.self)

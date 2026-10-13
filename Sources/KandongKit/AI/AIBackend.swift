@@ -73,8 +73,8 @@ public protocol AIBackend: Sendable {
     /// Short label for the panel badge, e.g. "Codex · gpt-6.1-sol".
     var label: String { get }
     func supportsImages() async -> Bool
-    /// Whether to ask this Backend to correct dictionary readings in context (多音字).
-    var correctsReadings: Bool { get }
+    /// How this Backend may change dictionary readings for the context (多音字).
+    var readingMode: ReadingMode { get }
     /// Whether the request and its reply fit in the model's context; nil when the Backend can't
     /// tell, in which case it reports `BackendError.contextTooLong` if it doesn't.
     func fits(_ request: AIRequest) async -> Bool?
@@ -87,7 +87,7 @@ public protocol AIBackend: Sendable {
 }
 
 extension AIBackend {
-    public var correctsReadings: Bool { true }
+    public var readingMode: ReadingMode { .free }
 
     public func fits(_ request: AIRequest) async -> Bool? { nil }
 

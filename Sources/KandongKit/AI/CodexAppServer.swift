@@ -374,10 +374,12 @@ public actor CodexAppServer {
 public struct CodexBackend: AIBackend {
     public let settings: CodexSettings
     public let server: CodexAppServer
+    public let readingMode: ReadingMode
 
-    public init(settings: CodexSettings, server: CodexAppServer = .shared) {
+    public init(settings: CodexSettings, server: CodexAppServer = .shared, readingMode: ReadingMode = BackendConfig.codex.readingMode) {
         self.settings = settings
         self.server = server
+        self.readingMode = readingMode
     }
 
 

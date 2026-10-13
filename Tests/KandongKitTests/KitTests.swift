@@ -69,6 +69,13 @@ import Testing
         #expect(parsed.readingCorrections.first?.pinyin == "liǎo")
     }
 
+    @Test func dropsTheFormatAppleEchoes() throws {
+        let echoed = #"{"chinese": "构建本地多模态代理\n响应使用以下JSON格式：{\"type\": \"object\"}", "note": ""}"#
+        #expect(try Prompts.parseReverse(echoed).chinese == "构建本地多模态代理")
+        let mentions = #"{"chinese": "把JSON文件发给我", "note": ""}"#
+        #expect(try Prompts.parseReverse(mentions).chinese == "把JSON文件发给我")
+    }
+
     @Test func rejectsReplyWithoutJSON() {
         #expect(throws: BackendError.self) { try Prompts.parseLearn("no idea") }
     }
@@ -84,7 +91,7 @@ import Testing
 
     @Test func translationOnlyLeavesOutReadings() throws {
         let analysis = OfflineAnalysis(source: "微信", segments: [Segment(id: 0, kind: .word, text: "微信", original: "微信", syllables: [Syllable(text: "wēi", tone: 1), Syllable(text: "xìn", tone: 4)])])
-        let request = Prompts.learn(text: "微信", analysis: analysis, context: "", terms: [], askForReadings: false)
+        let request = Prompts.learn(text: "微信", analysis: analysis, context: "", terms: [], readings: .off)
         #expect(!request.user.contains("[wēi xìn]"))
         #expect(!request.system.contains("readingCorrections"))
         #expect(request.schema == Prompts.translationSchema)
@@ -99,6 +106,39 @@ import Testing
 
 @Suite(.enabled(if: TestData.hasDictionary, "run scripts/fetch-data.sh"))
 struct CorrectionTests {
+    @Test func offersEachAmbiguousWordItsDictionaryReadings() throws {
+        let analysis = TestData.analyzer!.analyze("我还没吃饭，请把书还给我。")
+        let request = Prompts.learn(text: analysis.source, analysis: analysis, context: "", terms: [], readings: .choose)
+        let choices = ReadingChoice.all(in: analysis)
+        #expect(choices.filter { $0.word == "还" }.count == 2, "each 还 gets its own choice: \(choices)")
+        #expect(choices.allSatisfy { $0.options.count > 1 })
+        #expect(request.user.contains("\(choices[0].key) \(choices[0].word): \(choices[0].options.joined(separator: " | "))"))
+        let schema = try #require(request.schema)
+        #expect(schema["properties"]?["readings"]?["properties"]?[choices[0].key]?["enum"] == .array(choices[0].options.map { .string($0) }))
+        #expect(!request.user.contains("Dictionary pinyin"), "only the ambiguous words are sent")
+
+        let plain = TestData.analyzer!.analyze("微信")
+        #expect(Prompts.learn(text: "微信", analysis: plain, context: "", terms: [], readings: .choose).schema == Prompts.translationSchema,
+                "nothing to choose: just translate")
+    }
+
+    @Test func appliesChosenReadingsPerOccurrence() throws {
+        let analyzer = TestData.analyzer!
+        let engine = LookupEngine(analyzer: analyzer, workspace: Workspace(path: NSTemporaryDirectory()))
+        let analysis = analyzer.analyze("我还没吃饭，请把书还给我。")
+        let both = ReadingChoice.all(in: analysis).filter { $0.word == "还" }
+        let first = try #require(both.first), second = try #require(both.last)
+        let chosen = engine.applyReadings([first.key: "hái", second.key: "huán", "w999": "x"], to: analysis)
+        let readings = chosen.words.filter { $0.text == "还" }.map(\.pinyin)
+        #expect(readings == ["hái", "huán"])
+        let changed = chosen.words.filter { $0.text == "还" && $0.readingCorrected }
+        #expect(changed.count == 1, "only the one that differs from the dictionary is marked")
+
+        let invented = engine.applyReadings([first.key: "hài"], to: analysis)
+        #expect(invented.words.first { $0.text == "还" }?.pinyin == analysis.words.first { $0.text == "还" }?.pinyin,
+                "a reading the dictionary doesn't have is ignored")
+    }
+
     @Test func appliesContextualCorrection() throws {
         let analyzer = TestData.analyzer!
         let engine = LookupEngine(analyzer: analyzer, workspace: Workspace(path: NSTemporaryDirectory()))

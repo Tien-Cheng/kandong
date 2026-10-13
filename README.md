@@ -54,6 +54,12 @@ Pick and set up Backends in the **AI** section of the main window. Each one show
 - **Codex** uses your ChatGPT subscription through the installed `codex` CLI (`codex app-server`). Sign in once with `codex login`.
 - **Add Backend** for LM Studio, Ollama, OpenRouter, OpenAI or any OpenAI-compatible server. Local servers keep text on this Mac; keys for hosted APIs are stored in the Keychain. Vision models are detected for LM Studio, so screenshots go to the model; for text-only models, Kandong reads images with Apple's on-device OCR.
 - **LM Studio**: install [LM Studio](https://lmstudio.ai) and start its server, then add an LM Studio Backend and click **Download** next to the model recommended for your Mac's memory: Gemma 4 E4B with 16 GB or more, Gemma 4 12B with 32 GB or more. The list lives in [`models.json`](models.json), so it can change without a new release.
+- **Reading corrections**: the dictionary's pinyin comes first. Each Backend sets how the AI may change it for the context (多音字 like 还 hái/huán):
+  - **Choose** (Apple Intelligence and local models): the AI picks one of the dictionary's own readings.
+  - **Free** (Codex and hosted models): the AI corrects any reading.
+  - **Off**: the dictionary's readings stand.
+
+  Changed readings are marked "context reading".
 - **Thinking**: each Backend sets how much its model thinks before answering, separately for translating and explaining. Local models translate with thinking off, since it makes small models slow and can stall them. Kandong leaves sampling settings (temperature and so on) to LM Studio and Ollama, which use each model's recommended ones, and stops a reply that runs too long or repeats itself.
 
 If a Backend can't answer, the panel says why and offers the others; click the Backend badge in the panel header to try another one at any time.

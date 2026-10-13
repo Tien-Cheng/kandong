@@ -100,11 +100,11 @@ public struct LookupEngine: Sendable {
         let text = analysis.source
         let context = workspace.context()
         let parts = try await fitted(
-            text, backend: backend, steps: steps(askForReadings: backend.correctsReadings, context: context), thinking: thinking,
+            text, backend: backend, steps: steps(askForReadings: backend.readingMode != .off, context: context), thinking: thinking,
             request: { part, preceding, step in
                 Prompts.learn(
                     text: part, analysis: analysis, context: step.context(context), terms: workspace.matchingTerms(in: part),
-                    askForReadings: step.askForReadings, preceding: preceding
+                    readings: step.askForReadings ? backend.readingMode : .off, preceding: preceding
                 )
             },
             parse: { reply, part in
@@ -118,7 +118,8 @@ public struct LookupEngine: Sendable {
             }
         )
         let translation = Self.join(parts.map { ($0.text, $0.reply.translation) }, separator: " ")
-        return (translation, applyCorrections(parts.flatMap(\.reply.readingCorrections), to: analysis))
+        let chosen = applyReadings(parts.reduce(into: [:]) { $0.merge($1.reply.readings) { first, _ in first } }, to: analysis)
+        return (translation, applyCorrections(parts.flatMap(\.reply.readingCorrections), to: chosen))
     }
 
     /// Asks the Backend how to say English text in Chinese, then analyses that Chinese.
@@ -332,6 +333,33 @@ public struct LookupEngine: Sendable {
     /// Reads the text in an image with the Backend's vision model.
     public func transcribe(image: Data, backend: AIBackend) async throws -> String {
         Prompts.visibleText(try await backend.complete(Prompts.transcribe(image: image)))
+    }
+
+    /// Uses the readings the AI chose for words with more than one (keyed by `ReadingChoice.key`),
+    /// keeping the dictionary's as an alternative. Only the dictionary's own readings are taken, so a
+    /// Backend that ignores the schema can't make one up.
+    public func applyReadings(_ readings: [String: String], to analysis: OfflineAnalysis) -> OfflineAnalysis {
+        var result = analysis
+        for (key, reading) in readings {
+            guard key.hasPrefix("w"), let id = Int(key.dropFirst()),
+                  let index = result.segments.firstIndex(where: { $0.id == id && $0.isWord }) else { continue }
+            let old = result.segments[index]
+            // Tone marks matter (dé, děi, de), spacing and case don't.
+            let same = { (a: String, b: String) in
+                a.precomposedStringWithCanonicalMapping.lowercased().filter { !$0.isWhitespace }
+                    == b.precomposedStringWithCanonicalMapping.lowercased().filter { !$0.isWhitespace }
+            }
+            guard !same(reading, old.pinyin), let match = old.alternativeReadings.first(where: { same($0, reading) }) else { continue }
+            var syllables = match.split(separator: " ").map { Syllable(marked: String($0)) }
+            if syllables.count != old.text.count, let aligned = analyzer.align(text: old.text, transcription: match) {
+                syllables = aligned
+            }
+            guard !syllables.isEmpty else { continue }
+            result.segments[index].syllables = syllables
+            result.segments[index].readingCorrected = true
+            result.segments[index].alternativeReadings = [old.pinyin] + old.alternativeReadings.filter { $0.lowercased() != match.lowercased() }
+        }
+        return result
     }
 
     /// Replaces dictionary readings the AI says are wrong in context, keeping the old one as an alternative.
