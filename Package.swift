@@ -8,9 +8,13 @@ let package = Package(
         .executable(name: "Kandong", targets: ["Kandong"]),
         .library(name: "KandongKit", targets: ["KandongKit"]),
     ],
+    dependencies: [
+        // Self-update (the app only; KandongKit and its tests don't use it).
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
+    ],
     targets: [
         .target(name: "KandongKit", linkerSettings: [.linkedLibrary("sqlite3")]),
-        .executableTarget(name: "Kandong", dependencies: ["KandongKit"]),
+        .executableTarget(name: "Kandong", dependencies: ["KandongKit", .product(name: "Sparkle", package: "Sparkle")]),
         .testTarget(
             name: "KandongKitTests",
             dependencies: ["KandongKit"],

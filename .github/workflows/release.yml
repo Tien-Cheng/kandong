@@ -36,6 +36,23 @@ jobs:
           ditto -c -k --keepParent build/Kandong.app "$zip"
           shasum -a 256 "$zip" > "$zip.sha256"
           echo "zip=$zip" >> "$GITHUB_OUTPUT"
+      - name: Sign the update for Sparkle
+        # Installed copies update from releases/latest/download/appcast.xml; prereleases get none.
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          ZIP: ${{ steps.package.outputs.zip }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          curl -fsSL -o sparkle.tar.xz https://github.com/sparkle-project/Sparkle/releases/download/2.10.0/Sparkle-2.10.0.tar.xz
+          echo "c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c  sparkle.tar.xz" | shasum -a 256 -c --quiet
+          mkdir sparkle && tar -xJf sparkle.tar.xz -C sparkle
+          key="$RUNNER_TEMP/sparkle.key"
+          printf '%s' "$SPARKLE_ED_PRIVATE_KEY" > "$key"
+          repo="https://github.com/${GITHUB_REPOSITORY}/releases"
+          SIGN_UPDATE=sparkle/bin/sign_update SPARKLE_KEY_FILE="$key" scripts/make-appcast.sh build/Kandong.app "$ZIP" \
+            "$repo/download/$GITHUB_REF_NAME/$ZIP" "$repo/tag/$GITHUB_REF_NAME" > appcast.xml
+          rm -f "$key"
+          cat appcast.xml
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -48,13 +65,14 @@ jobs:
           2. Open it once. macOS blocks it because it isn't notarized, so go to **System Settings → Privacy & Security** and click **Open Anyway**.
           3. Grant **Accessibility** when asked (and **Screen Recording** for region capture).
 
-          Updating: quit Kandong and replace the app. Permissions carry over between releases.
+          Updating: Kandong 0.4.0 and later update themselves (menu bar → Check for Updates…). For earlier versions, quit Kandong and replace the app. Permissions carry over between releases.
 
           Needs macOS 27+. Translations use Apple Intelligence on this Mac by default; you can also use the [Codex CLI](https://github.com/openai/codex) (`codex login`) or [LM Studio](https://lmstudio.ai).
           NOTES
-          prerelease=()
+          prerelease=() appcast=()
           [[ "$GITHUB_REF_NAME" == *-* ]] && prerelease=(--prerelease)
-          gh release create "$GITHUB_REF_NAME" "$ZIP" "$ZIP.sha256" "${prerelease[@]}" \
+          [[ -f appcast.xml ]] && appcast=(appcast.xml)
+          gh release create "$GITHUB_REF_NAME" "$ZIP" "$ZIP.sha256" "${appcast[@]}" "${prerelease[@]}" \
             --title "Kandong ${GITHUB_REF_NAME}" --notes-file notes.md --generate-notes --verify-tag
       - name: Check out the Homebrew tap
         if: ${{ !contains(github.ref_name, '-') }}
@@ -74,6 +92,8 @@ jobs:
           sed -i '' -E "s/^  version \".*\"/  version \"$version\"/; s/^  sha256 \".*\"/  sha256 \"$sha\"/" Casks/kandong.rb
           # Builds need macOS 27 (Apple Intelligence's Foundation Models) and translate out of the box.
           sed -i '' -E "s/^  depends_on macos: .*/  depends_on macos: :golden_gate/" Casks/kandong.rb
+          # Kandong updates itself (Sparkle), so brew shouldn't count it as outdated.
+          grep -q '^  auto_updates true' Casks/kandong.rb || perl -pi -e 's/^(  depends_on macos: .*)$/  auto_updates true\n$1/' Casks/kandong.rb
           sed -i '' -E "s/^    Translations need the Codex CLI.*/    Translations use Apple Intelligence (turn it on in System Settings); Codex and LM Studio also work./" Casks/kandong.rb
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
