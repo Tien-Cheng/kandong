@@ -382,6 +382,11 @@ private struct WordRow: View {
                     .font(.callout)
                     .lineLimit(3)
                     .help(word.definitions.joined(separator: "\n"))
+                // An add-on's sense when CC-CEDICT has its own (its gloss already shows otherwise).
+                if !word.definitions.isEmpty, let source = word.addOnGlosses.first?.source {
+                    Text("\(source.components(separatedBy: " (").first ?? source): " + word.addOnGlosses.prefix(3).map(\.text).joined(separator: "; "))
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                }
                 if !word.alternativeReadings.isEmpty {
                     Text("also: " + word.alternativeReadings.prefix(3).joined(separator: ", "))
                         .font(.caption).foregroundStyle(.secondary)

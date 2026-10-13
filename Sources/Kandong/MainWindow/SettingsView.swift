@@ -9,6 +9,7 @@ struct SettingsView: View {
             shortcutsSection
             learningSection
             workspaceSection
+            dictionariesSection
             PermissionsSection()
             historySection
         }
@@ -69,6 +70,50 @@ struct SettingsView: View {
             Text("Workspace")
         } footer: {
             Text("context.md describes you and your domain; terms.csv fixes translations; vocabulary.csv holds saved words. Plain files, so agents can edit them — changes apply to the next lookup.")
+        }
+    }
+
+    private var dictionariesSection: some View {
+        Section {
+            LabeledContent("CC-CEDICT") { Text("Built in").foregroundStyle(.secondary) }
+            ForEach(model.addOns) { addOn in
+                LabeledContent {
+                    HStack {
+                        Text("\(addOn.entryCount.formatted()) words" + (addOn.updated.isEmpty ? "" : " · \(addOn.updated)"))
+                            .foregroundStyle(.secondary)
+                        if addOn.id == ETOGlossary.id {
+                            Button("Update", action: model.downloadTechnicalTerms).disabled(model.addOnStatus == .working)
+                        }
+                        Button("Remove") { model.removeAddOn(addOn) }
+                    }
+                } label: {
+                    Text(addOn.name)
+                    if !addOn.license.isEmpty { Text(addOn.license) }
+                }
+            }
+            if !model.addOns.contains(where: { $0.id == ETOGlossary.id }) {
+                LabeledContent {
+                    Button(model.addOnStatus == .working ? "Downloading…" : "Download", action: model.downloadTechnicalTerms)
+                        .disabled(model.addOnStatus == .working)
+                } label: {
+                    Text("Technical terms")
+                    Text("About 15,000 AI, chip and science terms from the CSET-ETO Chinese Technical Glossary (glossary.eto.tech). CC BY-NC 4.0: for non-commercial use.")
+                }
+            }
+            if case .failed(let message)? = model.addOnStatus {
+                Text(message).font(.caption).foregroundStyle(.orange)
+            }
+        } header: {
+            Text("Dictionaries")
+        } footer: {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Add-on dictionaries add words CC-CEDICT doesn't have, like 多模态 (multimodal). They're CC-CEDICT-format files in the Workspace's dictionaries folder; add your own there.")
+                Button("Show Folder") {
+                    try? FileManager.default.createDirectory(at: model.workspace.dictionariesURL, withIntermediateDirectories: true)
+                    NSWorkspace.shared.open(model.workspace.dictionariesURL)
+                }
+                .buttonStyle(.link)
+            }
         }
     }
 

@@ -65,6 +65,7 @@ Plain files in `~/.config/kandong/` (the folder can be changed in Settings). Edi
 - `context.md`: who you are and what you read. It is sent with every request.
 - `terms.csv` (`chinese,english,note`): fixed translations for names, slang and set phrases.
 - `vocabulary.csv`: saved words with the sentence they came from. Anki can import it directly.
+- `dictionaries/`: add-on dictionaries in CC-CEDICT format (`简体 简体 [pin1 yin1] /meaning/`), whose words are read as words and passed to the AI as a glossary. **Settings → Dictionaries → Technical terms** downloads the [CSET-ETO Chinese Technical Glossary](https://glossary.eto.tech) (about 15,000 AI, chip and science terms; CC BY-NC 4.0, so non-commercial use only) and converts it here. Add your own files too.
 
 History and repeat-sighting counts are kept in `~/Library/Application Support/Kandong/history.sqlite` (90 days by default).
 

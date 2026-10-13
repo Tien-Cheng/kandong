@@ -51,6 +51,8 @@ public final class Workspace: @unchecked Sendable {
     public var contextURL: URL { folder.appendingPathComponent("context.md") }
     public var termsURL: URL { folder.appendingPathComponent("terms.csv") }
     public var vocabularyURL: URL { folder.appendingPathComponent("vocabulary.csv") }
+    /// Add-on dictionaries (`AddOnDictionary`).
+    public var dictionariesURL: URL { folder.appendingPathComponent(AddOnDictionary.folderName, isDirectory: true) }
 
     static let termsHeader = ["chinese", "english", "note"]
     static let vocabularyHeader = ["simplified", "traditional", "pinyin", "gloss", "source_sentence", "added_at"]

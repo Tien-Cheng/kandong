@@ -155,7 +155,10 @@ public struct LookupEngine: Sendable {
     }
 
     private func explainRequest(_ text: String, translation: String?) -> AIRequest {
-        Prompts.explain(text: text, translation: translation, context: workspace.context(), terms: workspace.matchingTerms(in: text))
+        Prompts.explain(
+            text: text, translation: translation, context: workspace.context(), terms: workspace.matchingTerms(in: text),
+            glossary: analyzer.dictionary.hasAddOns ? analyzer.analyze(text).uniqueWords : []
+        )
     }
 
     /// The parts to explain one at a time: the whole text unless the Backend says it won't fit.

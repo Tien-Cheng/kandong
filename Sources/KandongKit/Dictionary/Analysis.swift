@@ -22,6 +22,8 @@ public struct Segment: Identifiable, Hashable, Codable, Sendable {
     public var alternativeReadings: [String]
     /// True when the AI changed the dictionary reading for this context.
     public var readingCorrected: Bool
+    /// What add-on dictionaries say the word means, e.g. a technical sense CC-CEDICT lacks.
+    public var addOnGlosses: [AddOnGloss] = []
 
     public init(
         id: Int, kind: Kind, text: String, original: String, syllables: [Syllable] = [],
@@ -43,7 +45,22 @@ public struct Segment: Identifiable, Hashable, Codable, Sendable {
     public var isAligned: Bool { syllables.count == text.count }
     public var pinyin: String { Pinyin.display(syllables) }
     public var isTraditional: Bool { original != text }
-    public var gloss: String { definitions.prefix(3).joined(separator: "; ") }
+    /// CC-CEDICT's first senses, or an add-on's when CC-CEDICT doesn't know the word.
+    public var gloss: String {
+        definitions.isEmpty ? addOnGlosses.map(\.text).joined(separator: "; ") : definitions.prefix(3).joined(separator: "; ")
+    }
+}
+
+/// An add-on dictionary's meaning for a word.
+public struct AddOnGloss: Hashable, Codable, Sendable {
+    /// The add-on's name.
+    public var source: String
+    public var text: String
+
+    public init(source: String, text: String) {
+        self.source = source
+        self.text = text
+    }
 }
 
 /// The instant, dictionary-only part of a Result.

@@ -27,6 +27,10 @@ final class AppModel {
     private(set) var workspaceRevision = 0
     private(set) var engine: LookupEngine?
     private(set) var dictionaryError: String?
+    /// The Workspace's add-on dictionaries, as last loaded.
+    private(set) var addOns: [AddOnDictionary] = []
+    /// A technical-terms download under way, or why the last one failed.
+    private(set) var addOnStatus: AddOnStatus?
     let history: HistoryStore
     var session: LookupSession?
     /// Last known readiness of each Backend, by id.
@@ -83,7 +87,11 @@ final class AppModel {
         workspace.stopWatching()
         workspace = Workspace(path: settings.workspacePath)
         try? workspace.ensureExists()
-        if let engine { self.engine = LookupEngine(analyzer: engine.analyzer, workspace: workspace) }
+        if let engine {
+            self.engine = LookupEngine(analyzer: engine.analyzer, workspace: workspace)
+            // Another Workspace may have other add-on dictionaries.
+            loadDictionary()
+        }
         workspace.watch { [weak self] in
             MainActor.assumeIsolated { self?.workspaceRevision += 1 }
         }
@@ -106,22 +114,52 @@ final class AppModel {
             .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Data")
     }
 
+    /// Loads CC-CEDICT and the Workspace's add-on dictionaries; called again when the add-ons change.
     private func loadDictionary() {
         let directory = Self.dataDirectory
+        let addOnFolder = workspace.dictionariesURL
         let task = Task.detached(priority: .userInitiated) { () -> OfflineAnalyzer? in
-            guard let dict = try? CEDict(contentsOf: directory.appendingPathComponent("cedict_ts.u8")) else { return nil }
+            let addOns = AddOnDictionary.all(in: addOnFolder)
+            guard let dict = try? CEDict(contentsOf: directory.appendingPathComponent("cedict_ts.u8"), addOns: addOns) else { return nil }
             let hsk = (try? HSKTable(contentsOf: directory.appendingPathComponent("hsk.tsv"))) ?? HSKTable()
             return OfflineAnalyzer(dictionary: dict, hsk: hsk)
         }
         analyzerTask = task
         Task {
             if let analyzer = await task.value {
+                guard analyzerTask == task else { return }
                 engine = LookupEngine(analyzer: analyzer, workspace: workspace)
+                addOns = AddOnDictionary.all(in: addOnFolder)
             } else {
                 dictionaryError = "Dictionary data missing in \(directory.path). Run scripts/fetch-data.sh and rebuild."
             }
         }
     }
+
+    // MARK: Add-on dictionaries
+
+    /// Downloads (or updates) the technical-terms glossary into the Workspace.
+    func downloadTechnicalTerms() {
+        guard addOnStatus != .working else { return }
+        addOnStatus = .working
+        let folder = workspace.dictionariesURL
+        Task {
+            do {
+                _ = try await ETOGlossary.download(into: folder)
+                addOnStatus = nil
+                loadDictionary()
+            } catch {
+                addOnStatus = .failed(error.localizedDescription)
+            }
+        }
+    }
+
+    func removeAddOn(_ addOn: AddOnDictionary) {
+        try? FileManager.default.removeItem(at: addOn.url)
+        loadDictionary()
+    }
+
+    enum AddOnStatus: Equatable { case working, failed(String) }
 
     private func readyEngine() async -> LookupEngine? {
         if let engine { return engine }
