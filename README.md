@@ -36,7 +36,7 @@ scripts/make-signing-identity.sh   # once: stable self-signed identity, so permi
 scripts/build-app.sh --install     # downloads dictionary data, builds, installs to ~/Applications, launches
 ```
 
-Tests: `swift test`. Live Codex round-trips: `KANDONG_LIVE=1 swift test --filter LiveCodexTests`. Backend eval (多音字, Translation fidelity, Reverse, Explain, latency): `KANDONG_LIVE=1 KANDONG_EVAL_BACKEND=apple swift test --filter KandongEval`; set `KANDONG_EVAL_BACKEND` to `codex` or to an LM Studio model, e.g. `KANDONG_EVAL_BACKEND='lmstudio:google/gemma-4-e4b'`. Releases are built by GitHub Actions; see [RELEASING.md](RELEASING.md).
+Tests: `swift test`. Backend eval (多音字, Translation fidelity, Reverse, Explain, latency): `KANDONG_LIVE=1 KANDONG_EVAL_BACKEND=apple swift test --filter KandongEval`; set `KANDONG_EVAL_BACKEND` to an LM Studio model to evaluate it, e.g. `KANDONG_EVAL_BACKEND='lmstudio:google/gemma-4-e4b'`. Releases are built by GitHub Actions; see [RELEASING.md](RELEASING.md).
 
 ## Use
 
@@ -70,18 +70,22 @@ Lookups can also be scripted: `open "kandong://lookup?text=你好"`, `kandong://
 Pick and set up Backends in the **AI** section of the main window. Each one shows whether it's ready and, if not, a button to fix it.
 
 - **Apple Intelligence** (default) runs Apple's on-device model: nothing to install or sign in to, and text stays on this Mac. Turn it on in System Settings → Apple Intelligence & Siri. It reads screenshots itself; text too long for it is translated in parts.
-- **Codex** uses your ChatGPT subscription through the installed `codex` CLI (`codex app-server`). Sign in once with `codex login`.
+- **ChatGPT** connects directly to an eligible ChatGPT Plus or Pro plan. Open **AI → ChatGPT → Continue with ChatGPT**, finish sign-in and consent in your browser, then choose **Use ChatGPT by default** if you want it to answer normal Lookups. No Codex installation or API key is required. Text and any images you send go to OpenAI; the ⇧ shortcut still uses your Local backend. You can switch saved accounts, reconnect, sign out, or open **Manage usage** in the same settings.
 - **Add Backend** for LM Studio, Ollama, OpenRouter, OpenAI or any OpenAI-compatible server. Local servers keep text on this Mac; keys for hosted APIs are stored in the Keychain. Vision models are detected for LM Studio, so screenshots go to the model; for text-only models, Kandong reads images with Apple's on-device OCR.
 - **LM Studio**: install [LM Studio](https://lmstudio.ai) and start its server, then add an LM Studio Backend and click **Download** next to the model recommended for your Mac's memory: Gemma 4 E4B with 16 GB or more, Gemma 4 12B with 32 GB or more. The list lives in [`models.json`](models.json), so it can change without a new release.
 - **Reading corrections**: the dictionary's pinyin comes first. Each Backend sets how the AI may change it for the context (多音字 like 还 hái/huán):
   - **Choose** (Apple Intelligence and local models): the AI picks one of the dictionary's own readings.
-  - **Free** (Codex and hosted models): the AI corrects any reading.
+  - **Free** (ChatGPT and hosted models): the AI corrects any reading.
   - **Off**: the dictionary's readings stand.
 
   Changed readings are marked "context reading". Reverse Lookups get them too: once the Chinese is in, the same Backend is asked how it reads, and the Reading updates.
 - **Thinking**: each Backend sets how much its model thinks before answering, separately for translating and explaining. Local models translate with thinking off, since it makes small models slow and can stall them. Kandong leaves sampling settings (temperature and so on) to LM Studio and Ollama, which use each model's recommended ones, and stops a reply that runs too long or repeats itself.
 
 If a Backend can't answer, the panel says why and offers the others; click the Backend badge in the panel header to try another one at any time.
+
+ChatGPT plan usage follows OpenAI's [open-source sign-in flow](https://developers.openai.com/siwc/token-sharing-open-source). Signing in and permission to use the plan are separate: if consent is missing, choose **Enable ChatGPT plan usage**. Usage-limit errors link to [ChatGPT usage settings](https://chatgpt.com/settings/usage). Kandong never switches to another backend or billing method automatically. Tokens stay in your Mac's login Keychain; account labels and preferences stay in Kandong's settings. Image capability detection is conservative when the account's model catalog omits it; choose **Reads images → Yes** for a model that supports images, or use on-device OCR.
+
+The former Codex Backend has been replaced by ChatGPT. Existing Codex default selections move to ChatGPT; connect once through **Continue with ChatGPT** if you haven't already. Other backend selections, saved ChatGPT accounts and preferences are preserved. Kandong does not import or modify Codex CLI credentials, and old Codex model/path settings are discarded because the direct ChatGPT account has its own model catalog.
 
 ## Workspace: Context, Terms, Vocabulary
 

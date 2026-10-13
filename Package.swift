@@ -14,7 +14,7 @@ let package = Package(
     ],
     targets: [
         .target(name: "KandongKit", linkerSettings: [.linkedLibrary("sqlite3")]),
-        .executableTarget(name: "Kandong", dependencies: ["KandongKit", .product(name: "Sparkle", package: "Sparkle")]),
+        .executableTarget(name: "Kandong", dependencies: ["KandongKit", .product(name: "Sparkle", package: "Sparkle")], resources: [.process("Resources")]),
         .testTarget(
             name: "KandongKitTests",
             dependencies: ["KandongKit"],

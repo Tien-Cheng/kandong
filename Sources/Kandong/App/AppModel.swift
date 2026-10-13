@@ -37,6 +37,17 @@ final class AppModel {
     private(set) var statuses: [String: BackendStatus] = [:]
     /// Bumped per Backend on each check, so a slow old check can't overwrite a newer result.
     @ObservationIgnored private var statusChecks: [String: Int] = [:]
+    private(set) var chatGPTAccounts: [ChatGPTAccount] = []
+    private(set) var chatGPTConnecting = false
+    private(set) var chatGPTSigningOut = false
+    private(set) var chatGPTMessage = ""
+    var chatGPTWelcomeAccountID: String?
+    @ObservationIgnored private var chatGPTAuthorization: Task<Void, Never>?
+    @ObservationIgnored let chatGPTBackendState = ChatGPTBackendState()
+    @ObservationIgnored lazy var chatGPTSession: ChatGPTSession = {
+        let store: any ChatGPTCredentialStore = isPreview ? PreviewChatGPTCredentialStore() : MacChatGPTCredentialStore()
+        return ChatGPTSession(store: store)
+    }()
     /// The models Kandong recommends for LM Studio; the bundled list until the latest is fetched.
     private(set) var modelCatalog = LocalModelCatalog.bundled
     @ObservationIgnored private var catalogLoaded = false
@@ -94,9 +105,6 @@ final class AppModel {
         if previous?.hotkeys != settings.hotkeys || previous == nil { hotkeys?.register(settings.hotkeys) }
         tapMonitor?.key = settings.tapKey
         if previous == nil || previous?.workspacePath != settings.workspacePath { openWorkspace() }
-        if previous?.codex.executablePath != settings.codex.executablePath {
-            Task { await CodexAppServer.shared.stop() }
-        }
     }
 
     /// Lets the shortcut recorder capture keys that are currently registered.
@@ -217,10 +225,93 @@ final class AppModel {
     func backend(for config: BackendConfig) -> AIBackend {
         switch config.type {
         case .appleIntelligence: AppleIntelligenceBackend(readingMode: config.readingMode)
-        case .codex: CodexBackend(settings: settings.codex, readingMode: config.readingMode)
+        case .chatGPT: ChatGPTBackend(settings: settings.chatGPT, session: chatGPTSession,
+                                    readingMode: config.readingMode, state: chatGPTBackendState)
         case .openAICompatible: OpenAICompatibleBackend(config: config, apiKey: Keychain.read(config.keychainAccount))
         }
     }
+
+    // MARK: ChatGPT accounts
+
+    func loadChatGPTAccounts() async {
+        guard !isPreview else { return }
+        do {
+            chatGPTAccounts = try await chatGPTSession.accounts()
+        } catch {
+            chatGPTMessage = error.localizedDescription
+        }
+    }
+
+    /// Keeps the current account active until OAuth and identity validation both succeed.
+    func connectChatGPT(accountID: String? = nil) {
+        guard !isPreview, !chatGPTConnecting, !chatGPTSigningOut else { return }
+        chatGPTConnecting = true
+        chatGPTMessage = ""
+        chatGPTAuthorization = Task {
+            defer { chatGPTConnecting = false; chatGPTAuthorization = nil }
+            do {
+                let account = try await chatGPTSession.authorize(accountID: accountID) { url in
+                    let opened = await MainActor.run { NSWorkspace.shared.open(url) }
+                    guard opened else { throw ChatGPTError.unavailable("Couldn't open your browser. Try Continue with ChatGPT again.") }
+                }
+                try Task.checkCancellation()
+                selectChatGPTAccount(account.id)
+                await chatGPTBackendState.clear(accountID: account.id)
+                await loadChatGPTAccounts()
+                if account.hasPlanPermission && !settings.chatGPT.welcomedAccountIDs.contains(account.id) {
+                    chatGPTWelcomeAccountID = account.id
+                } else if !account.hasPlanPermission {
+                    chatGPTMessage = "Signed in. Enable ChatGPT plan usage to translate with this account."
+                }
+                await refreshStatuses(only: BackendConfig.chatGPT.id)
+            } catch is CancellationError {
+                chatGPTMessage = "Sign-in cancelled."
+            } catch {
+                chatGPTMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func cancelChatGPTConnection() {
+        chatGPTAuthorization?.cancel()
+    }
+
+    func selectChatGPTAccount(_ id: String) {
+        guard settings.chatGPT.accountID != id else { return }
+        settings.chatGPT.accountID = id
+        settings.chatGPT.model = ""
+        chatGPTMessage = ""
+        Task { await refreshStatuses(only: BackendConfig.chatGPT.id) }
+    }
+
+    func signOutChatGPT() async {
+        guard let id = settings.chatGPT.accountID, !chatGPTConnecting, !chatGPTSigningOut else { return }
+        chatGPTSigningOut = true
+        defer { chatGPTSigningOut = false }
+        chatGPTMessage = ""
+        do { try await chatGPTSession.signOut(accountID: id) }
+        catch { chatGPTMessage = error.localizedDescription }
+        await chatGPTBackendState.clear(accountID: id)
+        await loadChatGPTAccounts()
+        await refreshStatuses(only: BackendConfig.chatGPT.id)
+    }
+
+    func acknowledgeChatGPTWelcome(useByDefault: Bool) {
+        if let id = chatGPTWelcomeAccountID, !settings.chatGPT.welcomedAccountIDs.contains(id) {
+            settings.chatGPT.welcomedAccountIDs.append(id)
+        }
+        if useByDefault { settings.defaultBackendID = BackendConfig.chatGPT.id }
+        chatGPTWelcomeAccountID = nil
+    }
+
+    #if DEBUG
+    func prepareChatGPTPreview(accounts: [ChatGPTAccount], status: BackendStatus, connecting: Bool = false) {
+        guard isPreview else { return }
+        chatGPTAccounts = accounts
+        statuses[BackendConfig.chatGPT.id] = status
+        chatGPTConnecting = connecting
+    }
+    #endif
 
     // MARK: Local models
 
@@ -314,7 +405,10 @@ final class AppModel {
     }
 
     /// Checks every Backend (or one) and remembers whether it can answer.
-    func refreshStatuses(only id: String? = nil) async {
+    func refreshStatuses(only id: String? = nil, clearChatGPTFailure: Bool = false) async {
+        if clearChatGPTFailure, let accountID = settings.chatGPT.accountID {
+            await chatGPTBackendState.clear(accountID: accountID)
+        }
         let configs = settings.backends.filter { id == nil || $0.id == id }
         await withTaskGroup(of: (String, Int, BackendStatus).self) { group in
             for config in configs {
@@ -327,6 +421,7 @@ final class AppModel {
                 statuses[id] = status
             }
         }
+        if configs.contains(where: { $0.type == .chatGPT }) { await loadChatGPTAccounts() }
     }
 
     func addBackend(_ preset: OpenAIPreset) -> BackendConfig {
@@ -353,6 +448,9 @@ final class AppModel {
     /// Does what a Backend's status suggests to make it ready.
     func perform(_ fix: FixAction) {
         switch fix {
+        case .connectChatGPT:
+            AppDelegate.shared?.showMainWindow(tab: .ai)
+            connectChatGPT(accountID: settings.chatGPT.accountID)
         case .openURL(let url, _):
             NSWorkspace.shared.open(url)
         case .copyCommand(let command, _):

@@ -45,7 +45,31 @@ struct AIBackendsView: View {
             }
         }
         .formStyle(.grouped)
-        .task { await model.refreshStatuses() }
+        .task { if !model.isPreview { await model.refreshStatuses() } }
+        .onChange(of: model.chatGPTConnecting, initial: true) {
+            if model.chatGPTConnecting { selectedID = BackendConfig.chatGPT.id }
+        }
+        .sheet(isPresented: Binding(
+            get: { model.chatGPTWelcomeAccountID != nil },
+            set: { if !$0 { model.acknowledgeChatGPTWelcome(useByDefault: false) } }
+        )) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("You're using your ChatGPT plan").font(.title2.bold())
+                Text("Eligible AI requests in Kandong use your ChatGPT plan. You can review usage and manage Kandong's access in ChatGPT settings.")
+                Link("Manage usage", destination: ChatGPTBackend.usageURL)
+                Text("Your current default backend stays selected unless you choose ChatGPT.")
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Button("Got it") { model.acknowledgeChatGPTWelcome(useByDefault: false) }
+                        .keyboardShortcut(.cancelAction)
+                    Spacer()
+                    Button("Use ChatGPT by default") { model.acknowledgeChatGPTWelcome(useByDefault: true) }
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding(24)
+            .frame(width: 440)
+        }
     }
 
     /// Looks the Backend up by id on every access, so a removed one can't index past the list.
@@ -64,7 +88,7 @@ struct AIBackendsView: View {
             .disabled(model.settings.defaultBackendID == config.id)
         Button("Use for ⇧ (Local)") { model.settings.localBackendID = config.id }
             .disabled(!config.isOnDevice || model.settings.localBackendID == config.id)
-        Button("Check Again") { Task { await model.refreshStatuses(only: config.id) } }
+        Button("Check Again") { Task { await model.refreshStatuses(only: config.id, clearChatGPTFailure: config.type == .chatGPT) } }
         if !config.isBuiltIn {
             Divider()
             Button("Remove", role: .destructive) { model.removeBackend(config) }
@@ -160,15 +184,16 @@ private struct BackendDetail: View {
                         .foregroundStyle(.secondary).lineLimit(3).textSelection(.enabled)
                         .multilineTextAlignment(.trailing)
                         .frame(maxWidth: .infinity, alignment: .trailing)
-                    if let fix = model.statuses[config.id]?.fix {
+                    if let fix = model.statuses[config.id]?.fix, config.type != .chatGPT {
                         Button(model.title(for: fix)) { model.perform(fix) }
                     }
-                    Button(testing ? "Testing…" : "Test", action: test).disabled(testing)
+                    Button(testing ? "Testing…" : "Test", action: test)
+                        .disabled(testing || (config.type == .chatGPT && !canTestChatGPT))
                 }
             }
             switch config.type {
             case .appleIntelligence: EmptyView()
-            case .codex: CodexFields(model: model)
+            case .chatGPT: ChatGPTFields(model: model)
             case .openAICompatible: OpenAIFields(model: model, config: $config)
             }
             Picker("Reading corrections", selection: $config.readingModeSetting) {
@@ -190,12 +215,18 @@ private struct BackendDetail: View {
         }
     }
 
+    private var canTestChatGPT: Bool {
+        guard !model.chatGPTConnecting, !model.chatGPTSigningOut,
+              let account = model.chatGPTAccounts.first(where: { $0.id == model.settings.chatGPT.accountID }) else { return false }
+        return account.isSignedIn && account.hasPlanPermission
+    }
+
     private var footer: String {
         switch config.type {
         case .appleIntelligence:
             "Apple's model on this Mac: nothing to install or sign in to, and text never leaves this Mac. Needs Apple Intelligence turned on in System Settings."
-        case .codex:
-            "Uses your ChatGPT subscription through the Codex CLI (`codex app-server`). Sign in with `codex login`. Less thinking answers faster."
+        case .chatGPT:
+            "Use an eligible ChatGPT Plus or Pro plan. Text and any images you send go to OpenAI. No terminal setup or API key is needed."
         case .openAICompatible:
             switch config.preset {
             case .lmStudio?: "Runs fully on this Mac. Install LM Studio and start its server (Developer tab, or `lms server start`), then download the recommended model here. Thinking makes small models slow and can stall them, so Kandong translates with it off."
@@ -214,6 +245,9 @@ private struct BackendDetail: View {
         Task {
             let started = Date()
             do {
+                if config.type == .chatGPT, let id = model.settings.chatGPT.accountID {
+                    await model.chatGPTBackendState.clear(accountID: id)
+                }
                 let reply = try await backend.complete(AIRequest(
                     system: "Translate to English. Reply with the translation only.", user: "你好，世界"
                 ))
@@ -227,32 +261,149 @@ private struct BackendDetail: View {
     }
 }
 
-private struct CodexFields: View {
+private struct ChatGPTFields: View {
     @Bindable var model: AppModel
-    @ViewState private var models: [CodexModel] = []
+    @Environment(\.colorScheme) private var colorScheme
+    @ViewState private var models: [ChatGPTModel] = []
+    @ViewState private var loadingModels = false
+    @ViewState private var modelError = ""
 
-    var body: some View {
-        Picker("Model", selection: $model.settings.codex.model) {
-            Text("Codex default").tag("")
-            ForEach(models) { Text($0.displayName + ($0.canReadImages ? "" : " (text only)")).tag($0.id) }
-            if !model.settings.codex.model.isEmpty, !models.contains(where: { $0.id == model.settings.codex.model }) {
-                Text(model.settings.codex.model).tag(model.settings.codex.model)
-            }
-        }
-        Picker("Thinking when translating", selection: $model.settings.codex.effort) {
-            ForEach(effortOptions(including: model.settings.codex.effort), id: \.self) { Text($0).tag($0) }
-        }
-        Picker("Thinking when explaining", selection: $model.settings.codex.explainEffort) {
-            ForEach(effortOptions(including: model.settings.codex.explainEffort), id: \.self) { Text($0).tag($0) }
-        }
-        TextField("codex path", text: $model.settings.codex.executablePath, prompt: Text("Found automatically"))
-            .task { models = (try? await CodexAppServer.shared.models(executablePath: model.settings.codex.executablePath)) ?? [] }
+    private var account: ChatGPTAccount? {
+        model.chatGPTAccounts.first { $0.id == model.settings.chatGPT.accountID }
     }
 
-    private func effortOptions(including current: String) -> [String] {
-        let fromModel = models.first { $0.id == model.settings.codex.model }?.reasoningEfforts ?? []
-        let options = fromModel.isEmpty ? ["minimal", "low", "medium", "high"] : fromModel
-        return options.contains(current) ? options : options + [current]
+    private var busy: Bool { model.chatGPTConnecting || model.chatGPTSigningOut }
+
+    private var logo: NSImage? {
+        let name = colorScheme == .dark ? "ChatGPTLogo" : "ChatGPTLogoWhite"
+        return Bundle.kandongResources.url(forResource: name, withExtension: "png").flatMap { NSImage(contentsOf: $0) }
+    }
+
+    var body: some View {
+        if !model.chatGPTAccounts.isEmpty {
+            Picker("ChatGPT account", selection: Binding(
+                get: { model.settings.chatGPT.accountID ?? "" },
+                set: { model.selectChatGPTAccount($0) }
+            )) {
+                if model.settings.chatGPT.accountID == nil { Text("Choose an account").tag("") }
+                ForEach(model.chatGPTAccounts) { item in
+                    Text(item.label + (item.isSignedIn ? "" : " (signed out)")).tag(item.id)
+                }
+            }
+            .disabled(busy)
+        }
+        if model.chatGPTConnecting {
+            LabeledContent("Sign-in") {
+                HStack {
+                    ProgressView().controlSize(.small)
+                    Text("Continue in your browser…").foregroundStyle(.secondary)
+                    Button("Cancel") { model.cancelChatGPTConnection() }
+                }
+            }
+        } else if account?.isSignedIn != true {
+            HStack {
+                Button {
+                    model.connectChatGPT(accountID: model.settings.chatGPT.accountID)
+                } label: {
+                    HStack(spacing: 8) {
+                        if let logo {
+                            Image(nsImage: logo).renderingMode(.original)
+                                .resizable().frame(width: 21, height: 21)
+                                .accessibilityHidden(true)
+                        }
+                        Text("Continue with ChatGPT").fontWeight(.medium)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(colorScheme == .dark ? .white : .black)
+                .foregroundStyle(colorScheme == .dark ? .black : .white)
+                .controlSize(.large)
+                .disabled(busy)
+                if account != nil {
+                    Button("Add Account") { model.connectChatGPT() }.disabled(busy)
+                }
+            }
+            if account != nil {
+                Button("Clear Saved Credentials") { Task { await model.signOutChatGPT() } }.disabled(busy)
+            }
+        } else {
+            LabeledContent("Connection") {
+                Text(account?.hasPlanPermission == true ? "Using ChatGPT plan" : "Plan usage not enabled")
+                    .foregroundStyle(.secondary)
+            }
+            HStack {
+                Button(account?.hasPlanPermission == true ? "Reconnect" : "Enable ChatGPT plan usage") {
+                    model.connectChatGPT(accountID: model.settings.chatGPT.accountID)
+                }
+                Button("Add Account") { model.connectChatGPT() }
+                Button(model.chatGPTSigningOut ? "Signing out…" : "Sign Out", role: .destructive) {
+                    Task { await model.signOutChatGPT() }
+                }
+            }
+            .disabled(busy)
+        }
+        if !model.chatGPTMessage.isEmpty {
+            Text(model.chatGPTMessage).foregroundStyle(.secondary).textSelection(.enabled)
+        }
+        if account?.hasPlanPermission == true && account?.isSignedIn == true {
+            Picker("Model", selection: $model.settings.chatGPT.model) {
+                Text(loadingModels ? "Loading models…" : "First available model").tag("")
+                ForEach(models) { Text($0.displayName).tag($0.id) }
+                if !model.settings.chatGPT.model.isEmpty, !models.contains(where: { $0.id == model.settings.chatGPT.model }) {
+                    Text(model.settings.chatGPT.model).tag(model.settings.chatGPT.model)
+                }
+            }
+            .disabled(loadingModels || busy)
+            if !modelError.isEmpty {
+                Text(modelError).font(.caption).foregroundStyle(.secondary)
+                Button("Reload Models") { Task { await refreshModels() } }.disabled(loadingModels || busy)
+            }
+            ThinkingPicker(title: "Thinking when translating", level: $model.settings.chatGPT.reasoning.translate,
+                           options: [""] + Reasoning.openAILevels)
+            ThinkingPicker(title: "Thinking when explaining", level: $model.settings.chatGPT.reasoning.explain,
+                           options: [""] + Reasoning.openAILevels)
+            Picker("Reads images", selection: $model.settings.chatGPT.vision) {
+                Text("Detect (uses on-device OCR if unknown)").tag(VisionSupport.auto)
+                Text("Yes").tag(VisionSupport.yes)
+                Text("No, use on-device OCR").tag(VisionSupport.no)
+            }
+            if model.settings.defaultBackendID != BackendConfig.chatGPT.id {
+                Button("Use ChatGPT by default") { model.settings.defaultBackendID = BackendConfig.chatGPT.id }
+            }
+        }
+        HStack {
+            Link("Manage usage", destination: ChatGPTBackend.usageURL)
+            Button("Check Again") {
+                Task { await model.refreshStatuses(only: BackendConfig.chatGPT.id, clearChatGPTFailure: true) }
+            }
+            .disabled(busy)
+        }
+            .task(id: model.settings.chatGPT.accountID) {
+                await model.loadChatGPTAccounts()
+                await refreshModels()
+            }
+            .onChange(of: model.chatGPTConnecting) {
+                if !model.chatGPTConnecting { Task { await refreshModels() } }
+            }
+    }
+
+    private func refreshModels() async {
+        guard !model.isPreview else { return }
+        let id = model.settings.chatGPT.accountID
+        models = []
+        modelError = ""
+        guard account?.isSignedIn == true, account?.hasPlanPermission == true else { return }
+        loadingModels = true
+        defer { loadingModels = false }
+        do {
+            let backend = ChatGPTBackend(settings: model.settings.chatGPT, session: model.chatGPTSession, state: model.chatGPTBackendState)
+            let result = try await backend.models()
+            guard id == model.settings.chatGPT.accountID else { return }
+            models = result
+        } catch {
+            guard id == model.settings.chatGPT.accountID else { return }
+            modelError = error.localizedDescription
+        }
     }
 }
 

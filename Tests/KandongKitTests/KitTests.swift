@@ -295,8 +295,6 @@ struct CorrectionTests {
     @Test func toleratesMissingKeys() throws {
         let settings = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"myLevel": 3, "codex": {"model": "x"}}"#.utf8))
         #expect(settings.myLevel == 3)
-        #expect(settings.codex.model == "x")
-        #expect(settings.codex.effort == "low")
         #expect(settings.hotkeys[.captureScreen] == AppSettings.defaultHotkeys[.captureScreen])
         #expect(settings.tapKey == .rightCommand)
     }
@@ -305,19 +303,19 @@ struct CorrectionTests {
         let settings = try JSONDecoder().decode(AppSettings.self, from: Data("{}".utf8))
         #expect(settings.defaultBackendID == "apple-intelligence")
         #expect(settings.localBackendID == "apple-intelligence")
-        #expect(settings.backends.map(\.id) == ["apple-intelligence", "codex", "lmstudio"])
+        #expect(settings.backends.map(\.id) == ["apple-intelligence", "chatgpt", "lmstudio"])
     }
 
     @Test func keepsExistingBackendChoices() throws {
         let settings = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"defaultBackend": "codex", "localBackend": "lmStudio"}"#.utf8))
-        #expect(settings.defaultBackendID == "codex")
+        #expect(settings.defaultBackendID == "chatgpt")
         #expect(settings.localBackendID == "lmstudio")
     }
 
     @Test func turnsLegacyEndpointsIntoBackends() throws {
         let legacy = #"{"defaultBackend": "custom", "localBackend": "custom", "lmStudio": {"baseURL": "http://localhost:1234/v1", "model": "qwen3", "vision": "auto"}, "custom": {"baseURL": "http://localhost:11434/v1", "model": "gemma", "vision": "no"}}"#
         let settings = try JSONDecoder().decode(AppSettings.self, from: Data(legacy.utf8))
-        #expect(settings.backends.map(\.id) == ["apple-intelligence", "codex", "lmstudio", "custom"])
+        #expect(settings.backends.map(\.id) == ["apple-intelligence", "chatgpt", "lmstudio", "custom"])
         #expect(settings.backend(id: "lmstudio")?.openAI?.model == "qwen3")
         let custom = try #require(settings.backend(id: "custom"))
         #expect(custom.preset == .ollama)
@@ -343,9 +341,9 @@ struct CorrectionTests {
         settings.backends.append(added)
         settings.defaultBackendID = added.id
         settings.removeBackend(id: added.id)
-        settings.removeBackend(id: "codex")
+        settings.removeBackend(id: "chatgpt")
         #expect(settings.defaultBackendID == "apple-intelligence")
-        #expect(settings.backends.map(\.id) == ["apple-intelligence", "codex", "lmstudio"], "built-ins can't be removed")
+        #expect(settings.backends.map(\.id) == ["apple-intelligence", "chatgpt", "lmstudio"], "built-ins can't be removed")
     }
 
     @Test func localBackendStopsBeingLocalWhenItsURLGoesRemote() {
@@ -367,7 +365,7 @@ struct CorrectionTests {
 
     @Test func keepsBuiltInsInAnEditedFile() throws {
         let settings = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"backends": [], "defaultBackendID": "gone"}"#.utf8))
-        #expect(settings.backends.map(\.id) == ["apple-intelligence", "codex"])
+        #expect(settings.backends.map(\.id) == ["apple-intelligence", "chatgpt"])
         #expect(settings.defaultBackendID == "apple-intelligence")
     }
 
@@ -377,80 +375,6 @@ struct CorrectionTests {
         settings.tapKey = .rightControl
         let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
         #expect(decoded == settings)
-    }
-}
-
-@Suite(.timeLimit(.minutes(1))) struct CodexProtocolTests {
-    func server() async throws -> CodexAppServer {
-        let script = Bundle.module.url(forResource: "fake_codex", withExtension: "py", subdirectory: "Fixtures")!
-        let server = CodexAppServer()
-        try await server.launchForTesting(executable: URL(fileURLWithPath: "/usr/bin/python3"), arguments: ["-I", script.path])
-        return server
-    }
-
-    @Test func streamsATurn() async throws {
-        let backend = CodexBackend(settings: CodexSettings(), server: try await server())
-        let reply = try await backend.complete(AIRequest(system: "s", user: "你好", schema: Prompts.learnSchema))
-        #expect(try Prompts.parseLearn(reply).translation == "Hello")
-    }
-
-    @Test func keepsStreamedDeltasInOrder() async throws {
-        let backend = CodexBackend(settings: CodexSettings(), server: try await server())
-        let reply = try await backend.complete(AIRequest(system: "s", user: "MANY"))
-        #expect(reply == (0..<300).map { "\($0)," }.joined())
-    }
-
-    @Test func deliversTheLastReplyBeforeAnExit() async throws {
-        for _ in 0..<5 {
-            let backend = CodexBackend(settings: CodexSettings(), server: try await server())
-            let reply = try await backend.complete(AIRequest(system: "s", user: "EXIT"))
-            #expect(reply.count == 200000)
-        }
-    }
-
-    @Test func surfacesFailedTurns() async throws {
-        let backend = CodexBackend(settings: CodexSettings(), server: try await server())
-        await #expect(throws: BackendError.failed("boom")) {
-            _ = try await backend.complete(AIRequest(system: "s", user: "FAIL"))
-        }
-    }
-
-    @Test func listsModels() async throws {
-        let models = try await server().models(executablePath: "")
-        #expect(models.map(\.id) == ["fast"])
-        #expect(models.first?.canReadImages == true)
-    }
-}
-
-/// Real Codex round trips. Opt in: `KANDONG_LIVE=1 swift test --filter LiveCodexTests`.
-@Suite(.enabled(if: ProcessInfo.processInfo.environment["KANDONG_LIVE"] == "1" && TestData.hasDictionary))
-struct LiveCodexTests {
-    let engine = LookupEngine(analyzer: TestData.analyzer!, workspace: {
-        let workspace = Workspace(folder: FileManager.default.temporaryDirectory.appendingPathComponent("kandong-live-\(UUID().uuidString)"))
-        try? workspace.ensureExists()
-        try? workspace.upsertTerm(Term(chinese: "加油", english: "you've got this"))
-        return workspace
-    }())
-    let backend = CodexBackend(settings: CodexSettings())
-
-    @Test func learnHonoursTerms() async throws {
-        let (translation, analysis) = try await engine.learn(engine.offline("明天考试，@Xiao Ming 加油！今晚再看一遍Quizlet"), backend: backend)
-        #expect(translation.localizedCaseInsensitiveContains("got this"))
-        #expect(translation.contains("@Xiao Ming"))
-        #expect(translation.contains("Quizlet"))
-        #expect(analysis.hasChinese)
-    }
-
-    @Test func reverseProducesChinese() async throws {
-        let (reply, analysis) = try await engine.reverse("Shall we practise speaking together this weekend?", backend: backend)
-        #expect(reply.chinese.containsHan)
-        #expect(analysis.hasChinese)
-    }
-
-    @Test func explainStreamsMarkdown() async throws {
-        var text = ""
-        for try await delta in engine.explain("你跟老师沟通过了吗？", translation: nil, backend: backend) { text += delta }
-        #expect(text.contains("过"))
     }
 }
 

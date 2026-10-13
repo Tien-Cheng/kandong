@@ -69,7 +69,7 @@ jobs:
 
           Updating: Kandong 0.4.0 and later update themselves (menu bar → Check for Updates…). For earlier versions, quit Kandong and replace the app. Permissions carry over between releases.
 
-          Needs macOS 27+. Translations use Apple Intelligence on this Mac by default; you can also use the [Codex CLI](https://github.com/openai/codex) (`codex login`) or [LM Studio](https://lmstudio.ai).
+          Needs macOS 27+. Translations use Apple Intelligence on this Mac by default; you can also connect an eligible ChatGPT plan with **AI → ChatGPT → Continue with ChatGPT**, or use [LM Studio](https://lmstudio.ai) and other OpenAI-compatible backends.
           NOTES
           prerelease=() appcast=()
           [[ "$GITHUB_REF_NAME" == *-* ]] && prerelease=(--prerelease)
@@ -96,7 +96,7 @@ jobs:
           sed -i '' -E "s/^  depends_on macos: .*/  depends_on macos: :golden_gate/" Casks/kandong.rb
           # Kandong updates itself (Sparkle), so brew shouldn't count it as outdated.
           grep -q '^  auto_updates true' Casks/kandong.rb || perl -pi -e 's/^(  depends_on macos: .*)$/  auto_updates true\n$1/' Casks/kandong.rb
-          sed -i '' -E "s/^    Translations need the Codex CLI.*/    Translations use Apple Intelligence (turn it on in System Settings); Codex and LM Studio also work./" Casks/kandong.rb
+          sed -i '' -E "s/^    Translations .*/    Translations use Apple Intelligence (turn it on in System Settings); ChatGPT and LM Studio also work./" Casks/kandong.rb
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -am "kandong $version"

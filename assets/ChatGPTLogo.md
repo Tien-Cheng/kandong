@@ -1,0 +1,3 @@
+# ChatGPT sign-in logo
+
+`ChatGPTLogo.svg` and `ChatGPTLogoWhite.svg` are the approved black and white logos from OpenAI's [Sign in with ChatGPT button formats](https://developers.openai.com/siwc/website), retrieved from the official [black asset](https://developers.openai.com/assets/siwc/sign-in-buttons/chatgpt-logo-black.svg) and [white asset](https://developers.openai.com/assets/siwc/sign-in-buttons/chatgpt-logo-white.svg). Their PNGs in `Sources/Kandong/Resources/` are 63 × 63 renderings for the native 21-point sign-in button. Use the ChatGPT name and logo according to OpenAI's branding guidance.

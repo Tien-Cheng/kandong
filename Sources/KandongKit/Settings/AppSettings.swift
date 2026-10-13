@@ -5,16 +5,26 @@ public enum VisionSupport: String, Codable, CaseIterable, Sendable {
     case auto, yes, no
 }
 
-public struct CodexSettings: Codable, Hashable, Sendable {
-    /// Path to the `codex` executable; empty means look it up.
-    public var executablePath = ""
-    /// Model id; empty means Codex's default model.
+/// Preferences only. ChatGPT credentials are kept separately in the login Keychain.
+public struct ChatGPTSettings: Codable, Hashable, Sendable {
+    public var accountID: String?
+    /// Empty chooses the first visible model offered by the account.
     public var model = ""
-    /// Reasoning effort for Translations (and reading images).
-    public var effort = "low"
-    public var explainEffort = "low"
+    public var vision: VisionSupport = .auto
+    public var reasoning: ReasoningSettings = .modelDefault
+    /// Acknowledged registrations, so ordinary reconnects don't repeat the welcome message.
+    public var welcomedAccountIDs: [String] = []
 
     public init() {}
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        accountID = try c.decodeIfPresent(String.self, forKey: .accountID)
+        model = (try? c.decodeIfPresent(String.self, forKey: .model)) ?? ""
+        vision = (try? c.decodeIfPresent(VisionSupport.self, forKey: .vision)) ?? .auto
+        reasoning = (try? c.decodeIfPresent(ReasoningSettings.self, forKey: .reasoning)) ?? .modelDefault
+        welcomedAccountIDs = (try? c.decodeIfPresent([String].self, forKey: .welcomedAccountIDs)) ?? []
+    }
 }
 
 public struct OpenAISettings: Codable, Hashable, Sendable {
@@ -76,7 +86,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
     public var defaultBackendID = BackendConfig.appleIntelligence.id
     /// Used when the user holds ⇧.
     public var localBackendID = BackendConfig.appleIntelligence.id
-    public var codex = CodexSettings()
+    public var chatGPT = ChatGPTSettings()
 
     public var hotkeys: [HotkeyAction: KeyCombo] = AppSettings.defaultHotkeys
     /// Modifier key that looks up the selection when tapped alone. Right ⌘ by default; right ⌥ is
@@ -101,7 +111,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         .lookupClipboard: KeyCombo(keyCode: 9, option: true, control: true),
     ]
 
-    static let defaultBackends: [BackendConfig] = [.appleIntelligence, .codex, .openAI(.lmStudio, id: "lmstudio")]
+    static let defaultBackends: [BackendConfig] = [.appleIntelligence, .chatGPT, .openAI(.lmStudio, id: "lmstudio")]
 
     public init() {}
 
@@ -140,7 +150,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case backends, defaultBackendID, localBackendID, codex, hotkeys, tapKey, myLevel, hasChosenLevel, pinyinForUnknownOnly
+        case backends, defaultBackendID, localBackendID, chatGPT, hotkeys, tapKey, myLevel, hasChosenLevel, pinyinForUnknownOnly
         case readingTypeface, alwaysExplain, workspacePath, historyRetentionDays
     }
 
@@ -149,21 +159,39 @@ public struct AppSettings: Codable, Hashable, Sendable {
         case defaultBackend, localBackend, lmStudio, custom
     }
 
+    private struct StoredBackend: Decodable {
+        let config: BackendConfig
+        let wasCodex: Bool
+        private enum CodingKeys: String, CodingKey { case type }
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            wasCodex = try c.decode(String.self, forKey: .type) == "codex"
+            config = try BackendConfig(from: decoder)
+        }
+    }
+
     // Decoding tolerates missing keys so settings survive app updates.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let d = AppSettings()
-        if let backends = try? c.decodeIfPresent([BackendConfig].self, forKey: .backends) {
+        if let stored = try? c.decodeIfPresent([StoredBackend].self, forKey: .backends) {
+            // An explicit ChatGPT configuration wins over the old Codex entry in transitional releases.
+            let backends = stored.filter { !$0.wasCodex }.map(\.config)
             // Built-ins always exist, even if an edited settings file lost them.
-            let missing = [BackendConfig.appleIntelligence, .codex].filter { builtIn in !backends.contains { $0.id == builtIn.id } }
+            let missing = [BackendConfig.appleIntelligence].filter { builtIn in !backends.contains { $0.id == builtIn.id } }
             self.backends = missing + backends
+            if !self.backends.contains(where: { $0.id == BackendConfig.chatGPT.id }) {
+                let index = self.backends.firstIndex(where: { $0.id == BackendConfig.appleIntelligence.id }).map { $0 + 1 } ?? 0
+                self.backends.insert(stored.first(where: \.wasCodex)?.config ?? .chatGPT, at: index)
+            }
             defaultBackendID = (try? c.decodeIfPresent(String.self, forKey: .defaultBackendID)) ?? d.defaultBackendID
             localBackendID = (try? c.decodeIfPresent(String.self, forKey: .localBackendID)) ?? d.localBackendID
+            if defaultBackendID == "codex" { defaultBackendID = BackendConfig.chatGPT.id }
         } else {
             try migrateLegacyBackends(from: decoder)
         }
         self = normalized()
-        codex = (try? c.decodeIfPresent(CodexSettings.self, forKey: .codex)) ?? d.codex
+        chatGPT = (try? c.decodeIfPresent(ChatGPTSettings.self, forKey: .chatGPT)) ?? d.chatGPT
         hotkeys = d.hotkeys.merging((try? c.decodeIfPresent([HotkeyAction: KeyCombo].self, forKey: .hotkeys)) ?? [:]) { $1 }
         tapKey = (try? c.decodeIfPresent(TapKey.self, forKey: .tapKey)) ?? d.tapKey
         myLevel = (try? c.decodeIfPresent(Int.self, forKey: .myLevel)) ?? d.myLevel
@@ -181,7 +209,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         let legacy = try decoder.container(keyedBy: LegacyKeys.self)
         var lmStudio = BackendConfig.openAI(.lmStudio, id: "lmstudio")
         if let settings = try? legacy.decodeIfPresent(OpenAISettings.self, forKey: .lmStudio) { lmStudio.openAI = settings }
-        backends = [.appleIntelligence, .codex, lmStudio]
+        backends = [.appleIntelligence, .chatGPT, lmStudio]
         let kinds = [LegacyKeys.defaultBackend, .localBackend].map { try? legacy.decodeIfPresent(String.self, forKey: $0) }
         // Old versions always saved the custom endpoint; if it's missing but chosen, use its old default.
         let customSettings = (try? legacy.decodeIfPresent(OpenAISettings.self, forKey: .custom))
@@ -195,7 +223,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         func id(forKind kind: String?) -> String? {
             switch kind {
             case "appleIntelligence": BackendConfig.appleIntelligence.id
-            case "codex": BackendConfig.codex.id
+            case "codex", "chatGPT": BackendConfig.chatGPT.id
             case "lmStudio": "lmstudio"
             case "custom": backend(id: "custom")?.id
             default: nil
@@ -213,17 +241,6 @@ extension OpenAISettings {
         model = (try? c.decodeIfPresent(String.self, forKey: .model)) ?? ""
         vision = (try? c.decodeIfPresent(VisionSupport.self, forKey: .vision)) ?? .auto
         reasoning = try? c.decodeIfPresent(ReasoningSettings.self, forKey: .reasoning)
-    }
-}
-
-extension CodexSettings {
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        executablePath = (try? c.decodeIfPresent(String.self, forKey: .executablePath)) ?? ""
-        model = (try? c.decodeIfPresent(String.self, forKey: .model)) ?? ""
-        effort = (try? c.decodeIfPresent(String.self, forKey: .effort)) ?? "low"
-        // Before it was per task, one effort applied to both.
-        explainEffort = (try? c.decodeIfPresent(String.self, forKey: .explainEffort)) ?? effort
     }
 }
 

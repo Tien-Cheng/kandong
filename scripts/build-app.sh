@@ -18,6 +18,7 @@ APP=build/Kandong.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 cp "$BIN" "$APP/Contents/MacOS/Kandong"
+cp -R "$BIN_DIR/Kandong_Kandong.bundle" "$APP/Contents/Resources/"
 # Sparkle (self-update). Its XPC services are only for sandboxed apps; Kandong isn't sandboxed.
 ditto "$BIN_DIR/Sparkle.framework" "$APP/Contents/Frameworks/Sparkle.framework"
 rm -rf "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices" "$APP/Contents/Frameworks/Sparkle.framework/XPCServices"
