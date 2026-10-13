@@ -17,6 +17,23 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Kandong"
 cp Data/cedict_ts.u8 Data/hsk.tsv Data/LXGWWenKaiLite-Regular.ttf assets/AppIcon.icns "$APP/Contents/Resources/"
+# Liquid Glass icon: Xcode 27's actool compiles assets/AppIcon.icon into Assets.car, which
+# CFBundleIconName points at (xcode-select can stay on the Command Line Tools). Without it, the
+# committed AppIcon.icns (CFBundleIconFile) is the icon. scripts/make-icon.sh regenerates the .icns.
+ICON_NAME=""
+DEV="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
+if [[ -d "$DEV" ]]; then
+  icon_tmp="$(mktemp -d)"; trap 'rm -rf "$icon_tmp"' EXIT
+  if DEVELOPER_DIR="$DEV" xcrun actool assets/AppIcon.icon --compile "$icon_tmp" \
+      --platform macosx --target-device mac --minimum-deployment-target 27.0 --app-icon AppIcon \
+      --output-partial-info-plist "$icon_tmp/partial.plist" >/dev/null 2>&1 \
+      && [[ -s "$icon_tmp/Assets.car" ]]; then
+    cp "$icon_tmp/Assets.car" "$APP/Contents/Resources/"
+    ICON_NAME="<key>CFBundleIconName</key><string>AppIcon</string>"
+  else
+    echo "actool in $DEV couldn't compile assets/AppIcon.icon; using AppIcon.icns only"
+  fi
+fi
 # Marketing version from $KANDONG_VERSION or the latest v* tag; build number from the commit count.
 VERSION="${KANDONG_VERSION:-$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo 0.0.0)}"
 VERSION="${VERSION#v}"
@@ -32,6 +49,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleDisplayName</key><string>Kandong</string>
   <key>CFBundleExecutable</key><string>Kandong</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
+  ${ICON_NAME}
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleVersion</key><string>${BUILD}</string>
