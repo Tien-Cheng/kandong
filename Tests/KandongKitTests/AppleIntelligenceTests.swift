@@ -39,6 +39,13 @@ import UniformTypeIdentifiers
         #expect(json["x-order"] == ["chinese", "note"])
     }
 
+    @Test func convertsReadingsOnlySchemas() throws {
+        let choices = try encoded(Prompts.choiceSchema([ReadingChoice(key: "w1", word: "还", options: ["huán", "hái"])], translation: false))
+        #expect(choices["x-order"] == ["readings"])
+        #expect("\(choices)".contains("hái"))
+        #expect(try encoded(Prompts.readingCorrectionsSchema)["x-order"] == ["readingCorrections"])
+    }
+
     @Test func marksUnlistedPropertiesOptional() throws {
         let json = try encoded(["type": "object", "required": ["a"], "properties": ["a": ["type": "string"], "b": ["type": "integer"]]])
         #expect(json["required"] == ["a"])

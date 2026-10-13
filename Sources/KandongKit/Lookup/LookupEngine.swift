@@ -175,6 +175,23 @@ public struct LookupEngine: Sendable {
         return (reply, analyzer.analyze(reply.chinese))
     }
 
+    /// Asks the same Backend how the Chinese it wrote for `english` reads in context, in its Reading
+    /// corrections mode, and applies the answer. A second, readings-only request: Choose can only
+    /// offer the dictionary's readings once the Chinese exists. Nothing is asked when the mode is
+    /// Off, no word has more than one reading, or the request doesn't fit; the dictionary's readings stand.
+    public func contextReadings(_ analysis: OfflineAnalysis, english: String, backend: AIBackend) async throws -> OfflineAnalysis {
+        guard let request = Prompts.readings(of: analysis, english: english, mode: backend.readingMode),
+              await backend.fits(request) != false else { return analysis }
+        let reply: LearnReply
+        do {
+            reply = try Prompts.parseReadings(try await backend.complete(request))
+        } catch BackendError.contextTooLong {
+            return analysis
+        }
+        // Only the kind of answer the mode asks for, as in `learn`.
+        return backend.readingMode == .choose ? applyReadings(reply.readings, to: analysis) : applyCorrections(reply.readingCorrections, to: analysis)
+    }
+
     public func explain(_ text: String, translation: String?, backend: AIBackend, thinking: ThinkingHandler? = nil) -> AsyncThrowingStream<String, Error> {
         var request = explainRequest(text, translation: translation)
         request.onThinking = thinking

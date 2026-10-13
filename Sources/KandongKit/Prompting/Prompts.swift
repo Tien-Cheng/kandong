@@ -28,6 +28,22 @@ public struct LearnReply: Codable, Hashable, Sendable {
     }
 }
 
+/// Readings asked on their own, for Chinese the Backend wrote itself (Reverse).
+struct ReadingsReply: Decodable {
+    var learnReply: LearnReply
+
+    private enum CodingKeys: String, CodingKey { case readings, readingCorrections }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        learnReply = LearnReply(
+            translation: "",
+            readings: (try? c.decodeIfPresent([String: String].self, forKey: .readings)) ?? [:],
+            readingCorrections: (try? c.decodeIfPresent([LearnReply.ReadingCorrection].self, forKey: .readingCorrections)) ?? []
+        )
+    }
+}
+
 /// A word the dictionary can read more than one way (多音字), and the readings it allows: the
 /// Backend picks one of these, so it can't make up pinyin.
 public struct ReadingChoice: Hashable, Sendable {
@@ -72,39 +88,48 @@ public enum Prompts {
         "type": "object",
         "additionalProperties": false,
         "required": ["translation", "readingCorrections"],
-        "properties": [
-            "translation": ["type": "string"],
-            "readingCorrections": [
-                "type": "array",
-                "items": [
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["word", "pinyin"],
-                    "properties": ["word": ["type": "string"], "pinyin": ["type": "string"]],
-                ],
-            ],
+        "properties": ["translation": ["type": "string"], "readingCorrections": correctionsProperty],
+    ]
+
+    /// `ReadingMode.free` for Chinese the Backend wrote itself (Reverse): the corrections only.
+    public static let readingCorrectionsSchema: JSONValue = [
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["readingCorrections"],
+        "properties": ["readingCorrections": correctionsProperty],
+    ]
+
+    private static let correctionsProperty: JSONValue = [
+        "type": "array",
+        "items": [
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["word", "pinyin"],
+            "properties": ["word": ["type": "string"], "pinyin": ["type": "string"]],
         ],
     ]
 
     /// `ReadingMode.choose`: the Translation, then one reading for each choice, from its options only.
-    public static func choiceSchema(_ choices: [ReadingChoice]) -> JSONValue {
+    /// Without `translation`, just the readings (Reverse: the Chinese is already written).
+    public static func choiceSchema(_ choices: [ReadingChoice], translation: Bool = true) -> JSONValue {
         var readings: [String: JSONValue] = [:]
         for choice in choices {
             readings[choice.key] = ["type": "string", "enum": .array(choice.options.map { .string($0) })]
         }
+        var properties: [String: JSONValue] = [
+            "readings": [
+                "type": "object",
+                "additionalProperties": false,
+                "required": .array(choices.map { .string($0.key) }),
+                "properties": .object(readings),
+            ],
+        ]
+        if translation { properties["translation"] = ["type": "string"] }
         return [
             "type": "object",
             "additionalProperties": false,
-            "required": ["translation", "readings"],
-            "properties": [
-                "translation": ["type": "string"],
-                "readings": [
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": .array(choices.map { .string($0.key) }),
-                    "properties": .object(readings),
-                ],
-            ],
+            "required": translation ? ["translation", "readings"] : ["readings"],
+            "properties": .object(properties),
         ]
     }
 
@@ -126,22 +151,44 @@ public enum Prompts {
     static let learnSystem = learnInstructions + """
     Reply with one JSON object and nothing else:
     {"translation": string, "readingCorrections": [{"word": string, "pinyin": string}]}
+    """ + "\n\n" + correctionsInstructions
 
+    static let chooseSystem = learnInstructions + """
+    Reply with one JSON object and nothing else:
+    {"translation": string, "readings": {"w1": string, ...}}
+    """ + "\n\n" + choiceInstructions
+
+    /// Reverse, `ReadingMode.free`: readings for Chinese the Backend has just written.
+    static let readingCorrectionsSystem = readingsInstructions + """
+    Reply with one JSON object and nothing else:
+    {"readingCorrections": [{"word": string, "pinyin": string}]}
+    """ + "\n\n" + correctionsInstructions
+
+    /// Reverse, `ReadingMode.choose`.
+    static let readingChoiceSystem = readingsInstructions + """
+    Reply with one JSON object and nothing else:
+    {"readings": {"w1": string, ...}}
+    """ + "\n\n" + choiceInstructions
+
+    private static let correctionsInstructions = """
     readingCorrections: the user gives dictionary pinyin for each word. List only words whose \
     pinyin is WRONG in this context (多音字 such as 了, 行, 得, 长, 重, 还, 着, 地). Give the correct \
     pinyin with tone marks, one space between syllables, citation tones (no tone sandhi). \
     Usually this list is empty.
     """
 
-    static let chooseSystem = learnInstructions + """
-    Reply with one JSON object and nothing else:
-    {"translation": string, "readings": {"w1": string, ...}}
-
+    private static let choiceInstructions = """
     readings: the user lists the words that can be read more than one way (多音字 such as 还, 行, 得, \
     了, 着, 长, 觉), each with its id and the readings the dictionary allows, the dictionary's guess \
     first. For every id, give the reading the word has in this text, copied exactly from its list. \
     Keep the first unless the context calls for another (还没 hái, 还给 huán; 睡着 zháo, 挂着 zhe; \
     得走 děi, 得到 dé, 跑得快 de).
+    """
+
+    private static let readingsInstructions = """
+    You help an English-speaking learner read Chinese aloud. The user gives English and the Chinese \
+    it was translated into, so you know what the Chinese means.
+
     """
 
     static let translateSystem = learnInstructions + """
@@ -261,6 +308,24 @@ public enum Prompts {
         return AIRequest(system: reverseSystem, user: user, schema: reverseSchema, expectedReplyLength: replyLength(text), streamField: "chinese")
     }
 
+    /// Reverse: how the Chinese written for `english` reads in context, asked once it is written so
+    /// that Choose can offer the dictionary's readings of its words. Nil when there is nothing to ask:
+    /// Off, or no word the dictionary reads more than one way.
+    public static func readings(of analysis: OfflineAnalysis, english: String, mode: ReadingMode) -> AIRequest? {
+        let choices = ReadingChoice.all(in: analysis)
+        guard mode != .off, !choices.isEmpty else { return nil }
+        let user = "English:\n\(english)\n\nChinese:\n\(analysis.source)\n\n"
+        if mode == .free {
+            let list = analysis.uniqueWords.map { "\($0.text) [\($0.pinyin)]" }.joined(separator: "\n")
+            return AIRequest(system: readingCorrectionsSystem, user: user + "Dictionary pinyin:\n\(list)", schema: readingCorrectionsSchema)
+        }
+        let list = choices.map { "\($0.key) \($0.word): \($0.options.joined(separator: " | "))" }.joined(separator: "\n")
+        return AIRequest(
+            system: readingChoiceSystem, user: user + "Words with more than one reading:\n\(list)",
+            schema: choiceSchema(choices, translation: false), expectedReplyLength: 50 + choices.count * 12
+        )
+    }
+
     public static func explain(text: String, translation: String?, context: String, terms: [Term], glossary: [Segment] = []) -> AIRequest {
         var user = steering(context: context, terms: terms, glossary: glossary)
         if !user.isEmpty { user += "\n\n" }
@@ -282,6 +347,11 @@ public enum Prompts {
 
     public static func parseReverse(_ reply: String) throws -> ReverseReply {
         try decode(ReverseReply.self, from: reply)
+    }
+
+    /// A reply to `readings(of:english:mode:)`: a Learn reply without the Translation.
+    public static func parseReadings(_ reply: String) throws -> LearnReply {
+        try decode(ReadingsReply.self, from: reply).learnReply
     }
 
     /// Apple's model sometimes carries on after its answer by repeating the reply format its framework

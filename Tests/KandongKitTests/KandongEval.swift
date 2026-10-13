@@ -84,6 +84,8 @@ struct KandongEval {
         Check(text: "I'll send you the link on WeChat later, check #HSK4", keep: ["#HSK4", "微信"]),
         // Apple Intelligence once answered 注册或使用本地环境进行开发 ("register…"), echoing the prompt.
         Check(text: "Build local multimodal agents with the first encoder-free architecture", keep: ["多模态"]),
+        // 还没 reads hái; the dictionary says huán.
+        Check(text: "We haven't tested it yet."),
     ]
 
     /// Explain: English Markdown that covers the key grammar point.
@@ -197,12 +199,19 @@ struct KandongEval {
 
         func reverse() async {
             let engine = engine, backend = backend
+            let correcting = CorrectingReadings(base: backend)
             for check in KandongEval.reverseChecks {
                 guard let (reply, analysis) = await call("reverse", { try await engine.reverse(check.text, backend: backend) }) else {
                     score("reverse", check.text, ["error: \(calls.last?.error ?? "")"])
                     continue
                 }
                 samples.append("\(check.text)\n    → \(reply.chinese)" + (reply.note.isEmpty ? "" : "  (\(reply.note))"))
+                // Context readings of the Backend's own Chinese, reviewed by hand.
+                if Prompts.readings(of: analysis, english: check.text, mode: correcting.readingMode) != nil,
+                   let corrected = await call("readings", { try await engine.contextReadings(analysis, english: check.text, backend: correcting) }) {
+                    let changed = corrected.segments.filter(\.readingCorrected).map { "\($0.text) \($0.pinyin)" }
+                    if !changed.isEmpty { samples.append("    readings: \(changed.joined(separator: ", "))") }
+                }
                 var problems = KandongEval.missing(check, in: reply.chinese)
                 if !reply.chinese.containsHan { problems.append("no Chinese") }
                 if analysis.containsTraditional { problems.append("Traditional") }
@@ -243,10 +252,10 @@ struct KandongEval {
                 "| Learn fidelity | \(rate("learn", KandongEval.learnChecks.count)) |",
                 "| Reverse | \(rate("reverse", KandongEval.reverseChecks.count)) |",
                 "| Explain | \(rate("explain", KandongEval.explainChecks.count)) |",
-                "| Learn/Reverse Lookups that finished | \(structured.count(where: { $0.error == nil }))/\(structured.count) (failed on bad JSON \(structured.count(where: \.badJSON))) |",
+                "| Learn, Reverse and readings replies that finished | \(structured.count(where: { $0.error == nil }))/\(structured.count) (failed on bad JSON \(structured.count(where: \.badJSON))) |",
                 "| Latency | median \(KandongEval.format(KandongEval.percentile(seconds, 0.5))), p90 \(KandongEval.format(KandongEval.percentile(seconds, 0.9))), total \(KandongEval.format(seconds.reduce(0, +))) over \(calls.count) calls |",
             ]
-            for kind in ["learn", "reverse", "explain"] {
+            for kind in ["learn", "reverse", "readings", "explain"] {
                 let times = calls.filter { $0.kind == kind }.map(\.seconds).sorted()
                 lines.append("|   \(kind) | median \(KandongEval.format(KandongEval.percentile(times, 0.5))), p90 \(KandongEval.format(KandongEval.percentile(times, 0.9))) |")
             }
