@@ -8,7 +8,7 @@
       "minMemoryGB": 16,
       "downloadGB": 6.9,
       "vision": true,
-      "note": "Fast and faithful translations; reads screenshots."
+      "note": "Fast and faithful; reads screenshots."
     },
     {
       "id": "google/gemma-4-12b",
@@ -17,7 +17,7 @@
       "minMemoryGB": 32,
       "downloadGB": 6.8,
       "vision": true,
-      "note": "The most natural Chinese of the small models; reads screenshots. Explains more slowly."
+      "note": "Most natural Chinese; reads screenshots."
     }
   ]
 }

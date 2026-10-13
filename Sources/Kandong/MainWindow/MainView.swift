@@ -31,6 +31,8 @@ enum MainTab: String, Hashable, CaseIterable, Identifiable {
 @Observable
 final class MainWindowState {
     var tab: MainTab = .history
+    /// The Backend whose settings the AI section shows.
+    var backendID = BackendConfig.appleIntelligence.id
 }
 
 struct MainView: View {
@@ -51,7 +53,7 @@ struct MainView: View {
                 case .history: HistoryView(model: model).padding(12)
                 case .vocabulary: VocabularyView(model: model).padding(12)
                 case .terms: TermsView(model: model).padding(12)
-                case .ai: AIBackendsView(model: model)
+                case .ai: AIBackendsView(model: model, selectedID: $state.backendID)
                 case .settings: SettingsView(model: model)
                 }
             }

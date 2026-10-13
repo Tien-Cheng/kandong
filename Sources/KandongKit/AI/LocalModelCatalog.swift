@@ -29,12 +29,11 @@ public struct LocalModelCatalog: Codable, Hashable, Sendable {
     public static let bundled = LocalModelCatalog(version: 1, models: [
         RecommendedModel(
             id: "google/gemma-4-e4b", name: "Gemma 4 E4B", huggingFace: "lmstudio-community/gemma-4-E4B-it-MLX-4bit",
-            minMemoryGB: 16, downloadGB: 6.9, vision: true, note: "Fast and faithful translations; reads screenshots."
+            minMemoryGB: 16, downloadGB: 6.9, vision: true, note: "Fast and faithful; reads screenshots."
         ),
         RecommendedModel(
             id: "google/gemma-4-12b", name: "Gemma 4 12B", huggingFace: "lmstudio-community/gemma-4-12B-it-MLX-4bit",
-            minMemoryGB: 32, downloadGB: 6.8, vision: true,
-            note: "The most natural Chinese of the small models; reads screenshots. Explains more slowly."
+            minMemoryGB: 32, downloadGB: 6.8, vision: true, note: "Most natural Chinese; reads screenshots."
         ),
     ])
 

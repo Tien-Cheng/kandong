@@ -4,7 +4,7 @@ import KandongKit
 /// The AI section: which Backend answers Lookups, every Backend's status, and its settings.
 struct AIBackendsView: View {
     @Bindable var model: AppModel
-    @ViewState private var selectedID = BackendConfig.appleIntelligence.id
+    @Binding var selectedID: String
 
     var body: some View {
         Form {
@@ -276,7 +276,8 @@ private struct OpenAIFields: View {
                 }
         }
         if config.isLMStudio {
-            RecommendedModelRow(model: model, config: config, downloaded: lmModels.map(\.id), reachable: reachable)
+            RecommendedModelRow(model: model, config: config, downloaded: lmModels.map(\.id), reachable: reachable,
+                                inUse: settings.wrappedValue.model.isEmpty ? lmModels.first?.id : settings.wrappedValue.model)
         }
         if config.isLMStudio && !lmModels.isEmpty {
             Picker("Model", selection: settings.model) {
@@ -355,6 +356,8 @@ private struct RecommendedModelRow: View {
     /// Models LM Studio already has.
     let downloaded: [String]
     let reachable: Bool
+    /// The model the Backend answers with: the chosen one, or the first LM Studio has loaded.
+    let inUse: String?
 
     var body: some View {
         let catalog = model.modelCatalog
@@ -380,9 +383,10 @@ private struct RecommendedModelRow: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(recommended.name)
+                    Text(recommended.name).foregroundStyle(.primary)
                     Text("About \(String(format: "%.1f", recommended.downloadGB)) GB · \(recommended.note)")
                         .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer()
                 action(for: recommended)
@@ -401,10 +405,9 @@ private struct RecommendedModelRow: View {
     }
 
     @ViewBuilder private func action(for recommended: RecommendedModel) -> some View {
-        let current = config.openAI?.model ?? ""
         if model.modelDownloads[config.id]?.isActive == true {
             EmptyView()
-        } else if current == recommended.id {
+        } else if inUse == recommended.id {
             Label("In use", systemImage: "checkmark.circle.fill").foregroundStyle(.green).labelStyle(.titleAndIcon)
         } else if downloaded.contains(recommended.id) {
             Button("Use It") { model.useModel(recommended.id, for: config.id) }
