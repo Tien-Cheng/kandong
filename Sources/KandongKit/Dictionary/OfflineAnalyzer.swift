@@ -33,7 +33,7 @@ public final class OfflineAnalyzer: Sendable {
                 pieces.append(Piece(text: text, original: original, isHan: false, syllables: nil))
             }
         }
-        pieces = repairSplits(pieces)
+        pieces = mergeAddOnWords(repairSplits(pieces))
         return OfflineAnalysis(source: source, segments: buildSegments(pieces))
     }
 
@@ -189,6 +189,35 @@ public final class OfflineAnalyzer: Sendable {
         return result
     }
 
+    /// Joins neighbouring words that make a word only an add-on dictionary has (多 + 摸 → 多摸), which
+    /// the system tokenizer can't know. The longest such word wins. Words CC-CEDICT also has are left
+    /// as the tokenizer split them, since it reads the context.
+    private func mergeAddOnWords(_ pieces: [Piece]) -> [Piece] {
+        guard dictionary.hasAddOns else { return pieces }
+        var result: [Piece] = []
+        var i = 0
+        while i < pieces.count {
+            var end: Int?
+            var text = ""
+            var j = i
+            while j < pieces.count, pieces[j].isHan, text.count + pieces[j].text.count <= dictionary.maxWordLength {
+                text += pieces[j].text
+                if j > i, dictionary.isAddOnWord(text) { end = j }
+                j += 1
+            }
+            guard let end else {
+                result.append(pieces[i])
+                i += 1
+                continue
+            }
+            let run = pieces[i...end]
+            let syllables = run.allSatisfy { $0.syllables != nil } ? run.flatMap { $0.syllables! } : nil
+            result.append(Piece(text: run.map(\.text).joined(), original: run.map(\.original).joined(), isHan: true, syllables: syllables))
+            i = end + 1
+        }
+        return result
+    }
+
     // MARK: - Readings
 
     /// Splits a tokenizer transcription ("liǎojiě") into one syllable per character, using each
@@ -282,10 +311,19 @@ public final class OfflineAnalyzer: Sendable {
                 alternatives.append(reading)
             }
         }
-        return Segment(
+        var segment = Segment(
             id: id, kind: .word, text: piece.text, original: piece.original, syllables: syllables,
-            definitions: entry?.definitions ?? [], hskLevel: hsk.level(of: piece.text),
+            definitions: entry?.source == nil ? entry?.definitions ?? [] : [], hskLevel: hsk.level(of: piece.text),
             alternativeReadings: alternatives
         )
+        // Only senses read the way the word is read here: ETO's 重大 chóng dà "Chongqing University" isn't
+        // 重大 zhòng dà "major".
+        for addOn in dictionary.entries(for: piece.text) where Pinyin.display(addOn.syllables).lowercased() == chosen.lowercased() {
+            guard let source = addOn.source else { continue }
+            for text in addOn.definitions where !segment.addOnGlosses.contains(where: { $0.text == text }) {
+                segment.addOnGlosses.append(AddOnGloss(source: source, text: text))
+            }
+        }
+        return segment
     }
 }

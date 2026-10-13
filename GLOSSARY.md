@@ -27,6 +27,10 @@ _Avoid_: Ruby, pinyin view
 The text split into words, each with its pinyin, gloss and HSK level.
 _Avoid_: Segmentation, word list
 
+**Add-on dictionary**:
+An extra word list the user adds to the built-in dictionary, e.g. technical terms. Its words are read as words, and their meanings show beside the built-in ones.
+_Avoid_: Plugin, custom dictionary
+
 **Translation**:
 A natural rendering of the whole text in the other language.
 

@@ -143,7 +143,7 @@ public enum Prompts {
         return String(cut).trimmingCharacters(in: .whitespacesAndNewlines) + " …"
     }
 
-    private static func steering(context: String, terms: [Term]) -> String {
+    private static func steering(context: String, terms: [Term], glossary: [Segment] = []) -> String {
         var parts: [String] = []
         if !context.isEmpty { parts.append("About me:\n\(context)") }
         if !terms.isEmpty {
@@ -151,6 +151,13 @@ public enum Prompts {
                 "- \(term.chinese) → \(term.english)" + (term.note.isEmpty ? "" : " (\(term.note))")
             }
             parts.append("My Terms (always translate these this way):\n" + lines.joined(separator: "\n"))
+        }
+        // Terms win; they may be written in Traditional characters.
+        let known = Set(terms.flatMap { [$0.chinese, $0.chinese.applyingTransform(StringTransform("Hant-Hans"), reverse: false) ?? $0.chinese] })
+        let entries = glossary.filter { !$0.addOnGlosses.isEmpty && !known.contains($0.text) && !known.contains($0.original) }.prefix(20)
+        if !entries.isEmpty {
+            let lines = entries.map { "- \($0.text) → " + $0.addOnGlosses.prefix(3).map(\.text).joined(separator: "; ") }
+            parts.append("Glossary (specialist meanings; use them where they fit):\n" + lines.joined(separator: "\n"))
         }
         return parts.joined(separator: "\n\n")
     }
@@ -160,7 +167,7 @@ public enum Prompts {
     public static func learn(
         text: String, analysis: OfflineAnalysis, context: String, terms: [Term], askForReadings: Bool = true, preceding: String? = nil
     ) -> AIRequest {
-        var user = steering(context: context, terms: terms)
+        var user = steering(context: context, terms: terms, glossary: analysis.uniqueWords.filter { text.contains($0.original) || text.contains($0.text) })
         if !user.isEmpty { user += "\n\n" }
         user += precedingNote(preceding) + "Text:\n\(text)"
         guard askForReadings else {
@@ -178,8 +185,8 @@ public enum Prompts {
         return AIRequest(system: reverseSystem, user: user, schema: reverseSchema, expectedReplyLength: replyLength(text), streamField: "chinese")
     }
 
-    public static func explain(text: String, translation: String?, context: String, terms: [Term]) -> AIRequest {
-        var user = steering(context: context, terms: terms)
+    public static func explain(text: String, translation: String?, context: String, terms: [Term], glossary: [Segment] = []) -> AIRequest {
+        var user = steering(context: context, terms: terms, glossary: glossary)
         if !user.isEmpty { user += "\n\n" }
         user += "Text:\n\(text)"
         if let translation, !translation.isEmpty { user += "\n\nTranslation (for reference):\n\(translation)" }

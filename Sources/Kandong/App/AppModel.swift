@@ -27,6 +27,10 @@ final class AppModel {
     private(set) var workspaceRevision = 0
     private(set) var engine: LookupEngine?
     private(set) var dictionaryError: String?
+    /// The Workspace's add-on dictionaries, as last loaded.
+    private(set) var addOns: [AddOnDictionary] = []
+    /// A technical-terms download under way, or why the last one failed.
+    private(set) var addOnStatus: AddOnStatus?
     let history: HistoryStore
     var session: LookupSession?
     /// Last known readiness of each Backend, by id.
@@ -40,7 +44,11 @@ final class AppModel {
     private(set) var modelDownloads: [String: ModelDownload] = [:]
     @ObservationIgnored private var downloadTasks: [String: Task<Void, Never>] = [:]
 
-    @ObservationIgnored private var analyzerTask: Task<OfflineAnalyzer?, Never>?
+    @ObservationIgnored private var analyzerTask: Task<(OfflineAnalyzer, [AddOnDictionary])?, Never>?
+    /// Bumped on each dictionary load, so an older load finishing late is ignored.
+    @ObservationIgnored private var dictionaryGeneration = 0
+    /// The add-on files the dictionary was loaded from, to notice changes made outside Kandong.
+    @ObservationIgnored private var loadedAddOnSignature = ""
     @ObservationIgnored private var hotkeys: HotkeyCenter!
     @ObservationIgnored private var tapMonitor: ModifierTapMonitor!
     @ObservationIgnored lazy var panel = ResultPanelController(model: self)
@@ -84,6 +92,8 @@ final class AppModel {
         workspace = Workspace(path: settings.workspacePath)
         try? workspace.ensureExists()
         if let engine { self.engine = LookupEngine(analyzer: engine.analyzer, workspace: workspace) }
+        // Another Workspace may have other add-on dictionaries (not at launch: init loads them next).
+        if analyzerTask != nil { loadDictionary() }
         workspace.watch { [weak self] in
             MainActor.assumeIsolated { self?.workspaceRevision += 1 }
         }
@@ -106,28 +116,83 @@ final class AppModel {
             .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Data")
     }
 
+    /// Loads CC-CEDICT and the Workspace's add-on dictionaries; called again when the add-ons or the
+    /// Workspace change. Lookups keep the old dictionary until the new one is ready.
     private func loadDictionary() {
+        dictionaryGeneration += 1
+        let generation = dictionaryGeneration
         let directory = Self.dataDirectory
-        let task = Task.detached(priority: .userInitiated) { () -> OfflineAnalyzer? in
-            guard let dict = try? CEDict(contentsOf: directory.appendingPathComponent("cedict_ts.u8")) else { return nil }
+        let addOnFolder = workspace.dictionariesURL
+        loadedAddOnSignature = AddOnDictionary.signature(of: addOnFolder)
+        let task = Task.detached(priority: .userInitiated) { () -> (OfflineAnalyzer, [AddOnDictionary])? in
+            let addOns = AddOnDictionary.all(in: addOnFolder)
+            guard let dict = try? CEDict(contentsOf: directory.appendingPathComponent("cedict_ts.u8"), addOns: addOns) else { return nil }
             let hsk = (try? HSKTable(contentsOf: directory.appendingPathComponent("hsk.tsv"))) ?? HSKTable()
-            return OfflineAnalyzer(dictionary: dict, hsk: hsk)
+            // The list in Settings doesn't need each file's text.
+            return (OfflineAnalyzer(dictionary: dict, hsk: hsk), addOns.map { var addOn = $0; addOn.text = ""; return addOn })
         }
         analyzerTask = task
         Task {
-            if let analyzer = await task.value {
+            let result = await task.value
+            guard generation == dictionaryGeneration else { return }
+            if let (analyzer, addOns) = result {
                 engine = LookupEngine(analyzer: analyzer, workspace: workspace)
+                self.addOns = addOns
             } else {
                 dictionaryError = "Dictionary data missing in \(directory.path). Run scripts/fetch-data.sh and rebuild."
             }
         }
     }
 
+    /// Reloads the dictionary if add-on files were added, changed or removed outside Kandong.
+    func reloadDictionariesIfChanged() {
+        guard analyzerTask != nil, AddOnDictionary.signature(of: workspace.dictionariesURL) != loadedAddOnSignature else { return }
+        loadDictionary()
+    }
+
+    // MARK: Add-on dictionaries
+
+    /// Downloads (or updates) the technical-terms glossary into the Workspace.
+    func downloadTechnicalTerms() {
+        guard addOnStatus != .working else { return }
+        addOnStatus = .working
+        let folder = workspace.dictionariesURL
+        Task {
+            do {
+                _ = try await ETOGlossary.download(into: folder)
+                // Only if the Workspace is still the one it was downloaded into.
+                guard folder == workspace.dictionariesURL else { addOnStatus = nil; return }
+                addOnStatus = nil
+                loadDictionary()
+            } catch {
+                addOnStatus = folder == workspace.dictionariesURL ? .failed(error.localizedDescription) : nil
+            }
+        }
+    }
+
+    func removeAddOn(_ addOn: AddOnDictionary) {
+        do {
+            try FileManager.default.removeItem(at: addOn.url)
+            if case .failed? = addOnStatus { addOnStatus = nil }
+        } catch {
+            addOnStatus = .failed("Couldn't remove \(addOn.name): \(error.localizedDescription)")
+        }
+        loadDictionary()
+    }
+
+    enum AddOnStatus: Equatable { case working, failed(String) }
+
     private func readyEngine() async -> LookupEngine? {
+        reloadDictionariesIfChanged()
         if let engine { return engine }
-        guard let analyzer = await analyzerTask?.value else { return nil }
-        if engine == nil { engine = LookupEngine(analyzer: analyzer, workspace: workspace) }
-        return engine
+        // The first load; a newer one may start while waiting, so wait for the latest.
+        while true {
+            let generation = dictionaryGeneration
+            guard let (analyzer, _) = await analyzerTask?.value else { return nil }
+            guard generation == dictionaryGeneration else { continue }
+            if engine == nil { engine = LookupEngine(analyzer: analyzer, workspace: workspace) }
+            return engine
+        }
     }
 
     // MARK: Backends
