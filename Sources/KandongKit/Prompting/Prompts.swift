@@ -38,7 +38,9 @@ public struct ReadingChoice: Hashable, Sendable {
     public var options: [String]
 
     /// The words of `analysis` with more than one reading, at most `limit` of them.
-    public static func all(in analysis: OfflineAnalysis, limit: Int = 30) -> [ReadingChoice] {
+    /// The limit only guards against huge schemas; a prompt too long for the Backend drops the
+    /// readings altogether (`LookupEngine.fitted`).
+    public static func all(in analysis: OfflineAnalysis, limit: Int = 200) -> [ReadingChoice] {
         analysis.segments.filter { $0.isWord && !$0.alternativeReadings.isEmpty }.prefix(limit).map {
             ReadingChoice(key: "w\($0.id)", word: $0.text, options: [$0.pinyin] + $0.alternativeReadings)
         }
@@ -236,7 +238,9 @@ public enum Prompts {
         case .choose:
             break
         }
-        let choices = ReadingChoice.all(in: analysis)
+        // Choices are asked only with the whole text: the ids are the whole text's words, and a part
+        // can't be asked about occurrences it doesn't contain.
+        let choices = text == analysis.source ? ReadingChoice.all(in: analysis) : []
         guard !choices.isEmpty else {
             return AIRequest(system: translateSystem, user: user, schema: translationSchema, expectedReplyLength: replyLength(text), streamField: "translation")
         }
@@ -275,18 +279,19 @@ public enum Prompts {
     }
 
     public static func parseReverse(_ reply: String) throws -> ReverseReply {
-        var parsed = try decode(ReverseReply.self, from: reply)
-        parsed.chinese = withoutFormatEcho(parsed.chinese)
-        return parsed
+        try decode(ReverseReply.self, from: reply)
     }
 
     /// Apple's model sometimes carries on after its answer by repeating the reply format its framework
-    /// added to the prompt ("响应使用以下JSON格式：{"type": …"). Lines from there on are dropped; the
-    /// first line always stays, so Chinese that merely mentions JSON is kept.
-    static func withoutFormatEcho(_ text: String) -> String {
+    /// added to the prompt ("响应使用以下JSON格式：{"type": …"). From such a line on, the reply is
+    /// dropped, unless the English being translated mentions JSON or has braces of its own.
+    public static func withoutFormatEcho(_ text: String, source: String) -> String {
+        guard !source.localizedCaseInsensitiveContains("json"), !source.contains("{") else { return text }
         let lines = text.components(separatedBy: "\n")
-        guard let echo = lines.indices.dropFirst().first(where: { lines[$0].contains("JSON格式") || lines[$0].contains(#"{"type":"#) })
-        else { return text }
+        guard let echo = lines.indices.dropFirst().first(where: { index in
+            let line = lines[index].trimmingCharacters(in: .whitespaces)
+            return line.contains("响应使用以下JSON格式") || line.hasPrefix(#"{"type":"#) || line.hasPrefix(#"{"type" :"#)
+        }) else { return text }
         return lines[..<echo].joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 

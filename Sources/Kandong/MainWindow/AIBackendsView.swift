@@ -170,10 +170,10 @@ private struct BackendDetail: View {
             case .codex: CodexFields(model: model)
             case .openAICompatible: OpenAIFields(model: model, config: $config)
             }
-            Picker("Reading corrections", selection: $config.readingMode) {
-                ForEach(ReadingMode.allCases) { mode in
-                    Text(mode.displayName + (mode == config.defaultReadingMode ? " (recommended)" : "")).tag(mode)
-                }
+            Picker("Reading corrections", selection: $config.readingModeSetting) {
+                Text("Recommended: " + config.defaultReadingMode.displayName).tag(ReadingMode?.none)
+                Divider()
+                ForEach(ReadingMode.allCases) { mode in Text(mode.displayName).tag(ReadingMode?.some(mode)) }
             }
             .help("Whether this Backend may change the dictionary's pinyin where a character has several readings (多音字).")
             if !config.isBuiltIn {

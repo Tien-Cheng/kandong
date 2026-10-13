@@ -69,11 +69,16 @@ import Testing
         #expect(parsed.readingCorrections.first?.pinyin == "liǎo")
     }
 
-    @Test func dropsTheFormatAppleEchoes() throws {
-        let echoed = #"{"chinese": "构建本地多模态代理\n响应使用以下JSON格式：{\"type\": \"object\"}", "note": ""}"#
-        #expect(try Prompts.parseReverse(echoed).chinese == "构建本地多模态代理")
-        let mentions = #"{"chinese": "把JSON文件发给我", "note": ""}"#
-        #expect(try Prompts.parseReverse(mentions).chinese == "把JSON文件发给我")
+    @Test func dropsTheFormatAppleEchoes() {
+        let english = "Build local multimodal agents"
+        #expect(Prompts.withoutFormatEcho("构建本地多模态代理\n响应使用以下JSON格式：{\"type\": \"object\"}", source: english) == "构建本地多模态代理")
+        #expect(Prompts.withoutFormatEcho("构建本地多模态代理\n{\"type\": \"object\"}", source: english) == "构建本地多模态代理")
+        let steps = "第一步：保存文件。\n第二步：使用JSON格式。\n第三步：发送文件。"
+        #expect(Prompts.withoutFormatEcho(steps, source: "Step one: save the file.\nStep two: use JSON format.\nStep three: send it.") == steps)
+        let config = "请使用此配置：\n{\"type\":\"object\"}\n然后重启。"
+        #expect(Prompts.withoutFormatEcho(config, source: "Use this config:\n{\"type\":\"object\"}\nthen restart.") == config)
+        #expect(Prompts.withoutFormatEcho("第一行\n第二行用JSON格式", source: "First line\nsecond line") == "第一行\n第二行用JSON格式",
+                "only the framework's own wording counts as an echo")
     }
 
     @Test func rejectsReplyWithoutJSON() {
@@ -120,6 +125,30 @@ struct CorrectionTests {
         let plain = TestData.analyzer!.analyze("微信")
         #expect(Prompts.learn(text: "微信", analysis: plain, context: "", terms: [], readings: .choose).schema == Prompts.translationSchema,
                 "nothing to choose: just translate")
+    }
+
+    @Test func asksOnlyWithTheWholeTextAndOffersEveryOccurrence() throws {
+        let analysis = TestData.analyzer!.analyze("请把书还给我。我还没吃饭。")
+        let part = Prompts.learn(text: "请把书还给我。", analysis: analysis, context: "", terms: [], readings: .choose)
+        #expect(part.schema == Prompts.translationSchema, "a part isn't asked about the whole text's words")
+        let long = TestData.analyzer!.analyze(String(repeating: "我还没吃饭。", count: 40))
+        let choices = ReadingChoice.all(in: long)
+        #expect(choices.filter { $0.word == "还" }.count == 40, "every occurrence is offered")
+    }
+
+    @Test func appliesOnlyTheAnswerTheModeAsksFor() async throws {
+        let analyzer = TestData.analyzer!
+        let engine = LookupEngine(analyzer: analyzer, workspace: Workspace(path: NSTemporaryDirectory()))
+        let analysis = analyzer.analyze("我还没吃饭。")
+        let key = try #require(ReadingChoice.all(in: analysis).first { $0.word == "还" }).key
+        // A server ignoring the schema answers both ways, one of them made up.
+        let reply = #"{"translation": "I haven't eaten yet.", "readings": {"\#(key)": "hái"}, "readingCorrections": [{"word": "还", "pinyin": "hài"}]}"#
+        func reading(_ mode: ReadingMode) async throws -> String? {
+            try await engine.learn(analysis, backend: CannedBackend(reply: reply, readingMode: mode)).analysis.words.first { $0.text == "还" }?.pinyin
+        }
+        #expect(try await reading(.choose) == "hái")
+        #expect(try await reading(.off) == analysis.words.first { $0.text == "还" }?.pinyin)
+        #expect(try await reading(.free) == "hài", "free mode takes the model's word, as it always did")
     }
 
     @Test func appliesChosenReadingsPerOccurrence() throws {
@@ -554,5 +583,38 @@ extension OpenAICompatibleTests {
         #expect(MarkdownLines.parse("third tone **.") == [.paragraph("third tone .")])
         #expect(MarkdownLines.parse("-5 degrees") == [.paragraph("-5 degrees")])
         #expect(MarkdownLines.parse("• item") == [.bullet(level: 0, text: "item")])
+    }
+}
+
+/// Answers every request with the same reply.
+struct CannedBackend: AIBackend {
+    let reply: String
+    var readingMode: ReadingMode = .free
+    var label: String { "Canned" }
+    func supportsImages() async -> Bool { false }
+    func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { $0.yield(reply); $0.finish() }
+    }
+}
+
+@Suite struct ReadingModeSettingTests {
+    @Test func keepsAnExplicitChoiceAndFollowsTheDefaultOtherwise() throws {
+        var config = BackendConfig.openAI(.other)
+        config.openAI?.baseURL = "http://localhost:8080/v1"
+        #expect(config.readingMode == .choose)
+        config.readingMode = .choose
+        let saved = try JSONDecoder().decode(BackendConfig.self, from: JSONEncoder().encode(config))
+        var moved = saved
+        moved.openAI?.baseURL = "https://example.org/v1"
+        #expect(moved.readingMode == .choose, "an explicit choice survives the default changing")
+        var following = BackendConfig.openAI(.other)
+        following.openAI?.baseURL = "https://example.org/v1"
+        #expect(following.readingMode == .free)
+    }
+
+    @Test func toleratesAModeFromANewerVersion() throws {
+        let json = #"{"id":"x","name":"X","type":"openAICompatible","preset":"other","openAI":{"baseURL":"https://example.org/v1"},"readingModeSetting":"telepathy"}"#
+        let config = try JSONDecoder().decode(BackendConfig.self, from: Data(json.utf8))
+        #expect(config.readingModeSetting == nil && config.readingMode == .free)
     }
 }

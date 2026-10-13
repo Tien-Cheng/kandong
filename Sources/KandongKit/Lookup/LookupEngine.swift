@@ -118,8 +118,16 @@ public struct LookupEngine: Sendable {
             }
         )
         let translation = Self.join(parts.map { ($0.text, $0.reply.translation) }, separator: " ")
-        let chosen = applyReadings(parts.reduce(into: [:]) { $0.merge($1.reply.readings) { first, _ in first } }, to: analysis)
-        return (translation, applyCorrections(parts.flatMap(\.reply.readingCorrections), to: chosen))
+        // Only the kind of answer the Backend's mode asks for: a server that ignores the schema can't
+        // slip free corrections past Choose or Off.
+        switch backend.readingMode {
+        case .off:
+            return (translation, analysis)
+        case .choose:
+            return (translation, applyReadings(parts.reduce(into: [:]) { $0.merge($1.reply.readings) { first, _ in first } }, to: analysis))
+        case .free:
+            return (translation, applyCorrections(parts.flatMap(\.reply.readingCorrections), to: analysis))
+        }
     }
 
     /// Asks the Backend how to say English text in Chinese, then analyses that Chinese.
@@ -133,7 +141,8 @@ public struct LookupEngine: Sendable {
                 Prompts.reverse(text: part, context: step.context(context), terms: workspace.matchingTerms(in: part), preceding: preceding)
             },
             parse: { reply, part in
-                let parsed = try Prompts.parseReverse(reply)
+                var parsed = try Prompts.parseReverse(reply)
+                parsed.chinese = Prompts.withoutFormatEcho(parsed.chinese, source: part)
                 if !parsed.chinese.containsHan, Self.needsTranslation(english: part) { throw BackendError.untranslated }
                 return parsed
             },

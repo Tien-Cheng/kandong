@@ -74,7 +74,8 @@ public struct BackendConfig: Codable, Hashable, Sendable, Identifiable {
     /// For OpenAI-compatible Backends: what they were set up as.
     public var preset: OpenAIPreset?
     public var openAI: OpenAISettings?
-    /// nil means `defaultReadingMode`.
+    /// The user's choice; nil follows `defaultReadingMode`, which may change with the Backend's URL or
+    /// a later release.
     public var readingModeSetting: ReadingMode?
 
     public init(id: String, name: String, type: BackendType, preset: OpenAIPreset? = nil, openAI: OpenAISettings? = nil) {
@@ -102,7 +103,7 @@ public struct BackendConfig: Codable, Hashable, Sendable, Identifiable {
     /// How this Backend may change readings.
     public var readingMode: ReadingMode {
         get { readingModeSetting ?? defaultReadingMode }
-        set { readingModeSetting = newValue == defaultReadingMode ? nil : newValue }
+        set { readingModeSetting = newValue }
     }
 
     /// From `KandongEval` (39 多音字 sentences, 12 the dictionary gets wrong): Apple Intelligence and
@@ -140,3 +141,19 @@ public struct BackendConfig: Codable, Hashable, Sendable, Identifiable {
 
 /// Keychain accounts renamed when Backends became a list; moved once at launch.
 public let legacyKeychainAccounts: [(from: String, to: String)] = [("custom-api-key", "api-key-custom")]
+
+extension BackendConfig {
+    private enum CodingKeys: String, CodingKey { case id, name, type, preset, openAI, readingModeSetting }
+
+    // A reading mode this version doesn't know (from a newer one) falls back to the default rather
+    // than losing the Backend.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        type = try c.decode(BackendType.self, forKey: .type)
+        preset = try c.decodeIfPresent(OpenAIPreset.self, forKey: .preset)
+        openAI = try c.decodeIfPresent(OpenAISettings.self, forKey: .openAI)
+        readingModeSetting = (try? c.decodeIfPresent(String.self, forKey: .readingModeSetting)).flatMap { $0.flatMap(ReadingMode.init(rawValue:)) }
+    }
+}
