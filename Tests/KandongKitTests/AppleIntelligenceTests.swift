@@ -27,6 +27,13 @@ import UniformTypeIdentifiers
         #expect(item["x-order"] == ["word", "pinyin"])
     }
 
+    @Test func convertsReadingChoicesToEnums() throws {
+        let schema = Prompts.choiceSchema([ReadingChoice(key: "w1", word: "还", options: ["huán", "hái"])])
+        let json = try encoded(schema)
+        #expect(json["x-order"] == ["translation", "readings"])
+        #expect("\(json)".contains("hái") && "\(json)".contains("huán"), "the options survive: \(json)")
+    }
+
     @Test func convertsReverseSchema() throws {
         let json = try encoded(Prompts.reverseSchema)
         #expect(json["x-order"] == ["chinese", "note"])

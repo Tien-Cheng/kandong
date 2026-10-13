@@ -100,9 +100,7 @@ public struct OpenAICompatibleBackend: AIBackend {
         return id
     }
 
-    /// Small local models turn right readings wrong about as often as they fix one (see `KandongEval`),
-    /// so for Backends on this Mac the dictionary's readings stand.
-    public var correctsReadings: Bool { !config.isOnDevice }
+    public var readingMode: ReadingMode { config.readingMode }
 
     /// Seconds a request may take in all. Thinking models can reason for minutes and a stuck one never
     /// stops, so this is a hard limit, with more time for longer texts.

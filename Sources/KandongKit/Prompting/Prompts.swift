@@ -8,18 +8,42 @@ public struct LearnReply: Codable, Hashable, Sendable {
     }
 
     public var translation: String
+    /// `ReadingMode.choose`: the reading chosen for each word that has more than one, by `ReadingChoice.key`.
+    public var readings: [String: String]
+    /// `ReadingMode.free`: words whose dictionary reading is wrong here, with the right one.
     public var readingCorrections: [ReadingCorrection]
 
-    public init(translation: String, readingCorrections: [ReadingCorrection] = []) {
+    public init(translation: String, readings: [String: String] = [:], readingCorrections: [ReadingCorrection] = []) {
         self.translation = translation
+        self.readings = readings
         self.readingCorrections = readingCorrections
     }
 
-    // Local models sometimes drop the empty list; treat it as "no corrections".
+    // Local models sometimes drop the readings; treat it as "keep the dictionary's".
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         translation = try c.decode(String.self, forKey: .translation)
+        readings = (try? c.decodeIfPresent([String: String].self, forKey: .readings)) ?? [:]
         readingCorrections = (try? c.decodeIfPresent([ReadingCorrection].self, forKey: .readingCorrections)) ?? []
+    }
+}
+
+/// A word the dictionary can read more than one way (多音字), and the readings it allows: the
+/// Backend picks one of these, so it can't make up pinyin.
+public struct ReadingChoice: Hashable, Sendable {
+    /// "w" and the word's Segment id, so each occurrence gets its own choice.
+    public var key: String
+    public var word: String
+    /// The dictionary's reading first.
+    public var options: [String]
+
+    /// The words of `analysis` with more than one reading, at most `limit` of them.
+    /// The limit only guards against huge schemas; a prompt too long for the Backend drops the
+    /// readings altogether (`LookupEngine.fitted`).
+    public static func all(in analysis: OfflineAnalysis, limit: Int = 200) -> [ReadingChoice] {
+        analysis.segments.filter { $0.isWord && !$0.alternativeReadings.isEmpty }.prefix(limit).map {
+            ReadingChoice(key: "w\($0.id)", word: $0.text, options: [$0.pinyin] + $0.alternativeReadings)
+        }
     }
 }
 
@@ -43,6 +67,7 @@ public struct ReverseReply: Codable, Hashable, Sendable {
 
 /// Builds the prompts sent to Backends and reads their replies.
 public enum Prompts {
+    /// `ReadingMode.free`: the Translation, then any readings the model says are wrong.
     public static let learnSchema: JSONValue = [
         "type": "object",
         "additionalProperties": false,
@@ -60,6 +85,28 @@ public enum Prompts {
             ],
         ],
     ]
+
+    /// `ReadingMode.choose`: the Translation, then one reading for each choice, from its options only.
+    public static func choiceSchema(_ choices: [ReadingChoice]) -> JSONValue {
+        var readings: [String: JSONValue] = [:]
+        for choice in choices {
+            readings[choice.key] = ["type": "string", "enum": .array(choice.options.map { .string($0) })]
+        }
+        return [
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["translation", "readings"],
+            "properties": [
+                "translation": ["type": "string"],
+                "readings": [
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": .array(choices.map { .string($0.key) }),
+                    "properties": .object(readings),
+                ],
+            ],
+        ]
+    }
 
     /// Learn without reading corrections, for Backends that don't make them.
     public static let translationSchema: JSONValue = [
@@ -84,6 +131,17 @@ public enum Prompts {
     pinyin is WRONG in this context (多音字 such as 了, 行, 得, 长, 重, 还, 着, 地). Give the correct \
     pinyin with tone marks, one space between syllables, citation tones (no tone sandhi). \
     Usually this list is empty.
+    """
+
+    static let chooseSystem = learnInstructions + """
+    Reply with one JSON object and nothing else:
+    {"translation": string, "readings": {"w1": string, ...}}
+
+    readings: the user lists the words that can be read more than one way (多音字 such as 还, 行, 得, \
+    了, 着, 长, 觉), each with its id and the readings the dictionary allows, the dictionary's guess \
+    first. For every id, give the reading the word has in this text, copied exactly from its list. \
+    Keep the first unless the context calls for another (还没 hái, 还给 huán; 睡着 zháo, 挂着 zhe; \
+    得走 děi, 得到 dé, 跑得快 de).
     """
 
     static let translateSystem = learnInstructions + """
@@ -162,20 +220,36 @@ public enum Prompts {
         return parts.joined(separator: "\n\n")
     }
 
-    /// With `askForReadings` off, the reply has only the Translation. `preceding` is the text just
-    /// before this part of a longer text, given for context only.
+    /// `readings` sets how the reply may change dictionary readings; with `.off` it has only the
+    /// Translation. `preceding` is the text just before this part of a longer text, for context only.
     public static func learn(
-        text: String, analysis: OfflineAnalysis, context: String, terms: [Term], askForReadings: Bool = true, preceding: String? = nil
+        text: String, analysis: OfflineAnalysis, context: String, terms: [Term], readings: ReadingMode = .free, preceding: String? = nil
     ) -> AIRequest {
         var user = steering(context: context, terms: terms, glossary: analysis.uniqueWords.filter { text.contains($0.original) || text.contains($0.text) })
         if !user.isEmpty { user += "\n\n" }
         user += precedingNote(preceding) + "Text:\n\(text)"
-        guard askForReadings else {
+        switch readings {
+        case .off:
+            return AIRequest(system: translateSystem, user: user, schema: translationSchema, expectedReplyLength: replyLength(text), streamField: "translation")
+        case .free:
+            let list = analysis.uniqueWords.map { "\($0.text) [\($0.pinyin)]" }.joined(separator: "\n")
+            user += "\n\nDictionary pinyin:\n\(list)"
+            return AIRequest(system: learnSystem, user: user, schema: learnSchema, expectedReplyLength: replyLength(text), streamField: "translation")
+        case .choose:
+            break
+        }
+        // Choices are asked only with the whole text: the ids are the whole text's words, and a part
+        // can't be asked about occurrences it doesn't contain.
+        let choices = text == analysis.source ? ReadingChoice.all(in: analysis) : []
+        guard !choices.isEmpty else {
             return AIRequest(system: translateSystem, user: user, schema: translationSchema, expectedReplyLength: replyLength(text), streamField: "translation")
         }
-        let readings = analysis.uniqueWords.map { "\($0.text) [\($0.pinyin)]" }.joined(separator: "\n")
-        user += "\n\nDictionary pinyin:\n\(readings)"
-        return AIRequest(system: learnSystem, user: user, schema: learnSchema, expectedReplyLength: replyLength(text), streamField: "translation")
+        let list = choices.map { "\($0.key) \($0.word): \($0.options.joined(separator: " | "))" }.joined(separator: "\n")
+        user += "\n\nWords with more than one reading:\n\(list)"
+        return AIRequest(
+            system: chooseSystem, user: user, schema: choiceSchema(choices),
+            expectedReplyLength: replyLength(text) + choices.count * 12, streamField: "translation"
+        )
     }
 
     public static func reverse(text: String, context: String, terms: [Term], preceding: String? = nil) -> AIRequest {
@@ -206,6 +280,19 @@ public enum Prompts {
 
     public static func parseReverse(_ reply: String) throws -> ReverseReply {
         try decode(ReverseReply.self, from: reply)
+    }
+
+    /// Apple's model sometimes carries on after its answer by repeating the reply format its framework
+    /// added to the prompt ("响应使用以下JSON格式：{"type": …"). From such a line on, the reply is
+    /// dropped, unless the English being translated mentions JSON or has braces of its own.
+    public static func withoutFormatEcho(_ text: String, source: String) -> String {
+        guard !source.localizedCaseInsensitiveContains("json"), !source.contains("{") else { return text }
+        let lines = text.components(separatedBy: "\n")
+        guard let echo = lines.indices.dropFirst().first(where: { index in
+            let line = lines[index].trimmingCharacters(in: .whitespaces)
+            return line.contains("响应使用以下JSON格式") || line.hasPrefix(#"{"type":"#) || line.hasPrefix(#"{"type" :"#)
+        }) else { return text }
+        return lines[..<echo].joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     static func decode<T: Decodable>(_ type: T.Type, from reply: String) throws -> T {

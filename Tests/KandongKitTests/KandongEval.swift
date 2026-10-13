@@ -12,11 +12,12 @@ private let evalEnabled = ProcessInfo.processInfo.environment["KANDONG_LIVE"] ==
 ///     KANDONG_LIVE=1 KANDONG_EVAL_BACKEND=lmstudio:google/gemma-4-e4b swift test --filter KandongEval
 ///
 /// `KANDONG_EVAL_BACKEND` is `apple` (the default), `codex`, or `lmstudio:<model id>` (LM Studio at localhost:1234);
+/// `KANDONG_EVAL_READINGS` is `free` (the default) or `choose`, the `ReadingMode` used for 多音字;
 /// `KANDONG_EVAL_TIMEOUT` caps each call (seconds, default 90). A timed-out Codex call isn't interrupted (the Codex
 /// Backend doesn't stop a running turn), so it may keep running while the next case starts.
 ///
 /// Apple Intelligence on macOS 27.0.1 (AFM 3 Core Advanced) fixed 1 多音字, missed 2–3 and turned 1–3 readings
-/// wrong (e.g. 还给 huán → hái) over two runs, which is why it has `correctsReadings = false`.
+/// wrong (e.g. 还给 huán → hái) over two runs, which is why it doesn't correct readings by default.
 @Suite(.enabled(if: evalEnabled), .serialized)
 struct KandongEval {
     static let backendName = evalBackendName
@@ -37,21 +38,20 @@ struct KandongEval {
 
     // MARK: Cases
 
-    /// 多音字: the bracketed character must read as given in context.
+    /// 多音字: the bracketed character must read as given in context. The first 12 the dictionary gets
+    /// wrong (一行 can't be fixed by choosing: CC-CEDICT only reads it yī xíng); the rest it gets right,
+    /// so a Backend can only make them worse.
     static let polyphones: [(String, String)] = [
-        ("我[还]没吃饭。", "hái"), ("请把书[还]给我。", "huán"),
-        ("他是银[行]的职员。", "háng"), ("这样[行]不行？", "xíng"),
-        ("他跑[得]很快。", "de"), ("你[得]早点儿来。", "děi"),
-        ("孩子[长]大了。", "zhǎng"), ("这条河很[长]。", "cháng"),
-        ("这个箱子很[重]。", "zhòng"), ("请你[重]新写一遍。", "chóng"),
-        ("我明白[了]。", "le"), ("这件事我[了]解。", "liǎo"),
-        ("他[着]急地问我。", "zháo"), ("墙上挂[着]一幅画。", "zhe"),
-        ("他慢慢[地]走了。", "de"), ("[地]上很脏。", "dì"),
-        ("这个菜很[便]宜。", "pián"), ("我[觉]得很好。", "jué"),
-        ("我昨天睡了一[觉]。", "jiào"), ("[为]什么？", "wèi"),
-        ("他成[为]了老师。", "wéi"), ("我的成绩很[差]。", "chà"),
-        ("他去北京出[差]了。", "chāi"), ("我们[调]查一下。", "diào"),
-        ("音[乐]很好听。", "yuè"),
+        ("我[还]没吃饭。", "hái"), ("你[还]好吗？", "hái"), ("这样[行]不行？", "xíng"), ("这一[行]字写错了。", "háng"),
+        ("你[得]早点儿来。", "děi"), ("我昨天睡了一[觉]。", "jiào"), ("吃完[了]吗？", "le"), ("他睡[着]了。", "zháo"),
+        ("你猜[着]了吗？", "zháo"), ("这个[长]得很高。", "zhǎng"), ("[数]一数有几个。", "shǔ"), ("他[背]着书包。", "bēi"),
+        ("请把书[还]给我。", "huán"), ("他借钱不[还]。", "huán"), ("你真[行]！", "xíng"), ("我[得]走了。", "děi"),
+        ("他[得]了第一名。", "dé"), ("说[得]对。", "de"), ("这事[得]好好想想。", "děi"), ("我明白[了]。", "le"),
+        ("墙上挂[着]画。", "zhe"), ("这条路很[长]。", "cháng"), ("这个箱子很[重]。", "zhòng"), ("这个菜很[便]宜。", "pián"),
+        ("我[为]你高兴。", "wèi"), ("我的成绩很[差]。", "chà"), ("他慢慢[地]走了。", "de"), ("这个字怎么[读]？", "dú"),
+        ("你[都]来了。", "dōu"), ("他[会]来的。", "huì"), ("我[只]有一个。", "zhǐ"), ("一[只]猫。", "zhī"),
+        ("天气很[好]。", "hǎo"), ("我们[种]了很多树。", "zhòng"), ("他[和]我一起去。", "hé"), ("这是[假]的。", "jiǎ"),
+        ("他[哄]孩子睡觉。", "hǒng"), ("这题很[难]。", "nán"), ("把门[背]上。", "bēi"),
     ]
 
     struct Check {
@@ -207,6 +207,7 @@ struct KandongEval {
                 if !reply.chinese.containsHan { problems.append("no Chinese") }
                 if analysis.containsTraditional { problems.append("Traditional") }
                 if KandongEval.isUntranslated(reply.note) { problems.append("note not in English") }
+                if reply.chinese.contains("JSON") || reply.chinese.contains("{") { problems.append("format text in the reply") }
                 if !problems.isEmpty { problems.append("got: \(reply.chinese)") }
                 score("reverse", check.text, problems)
             }
@@ -237,7 +238,7 @@ struct KandongEval {
             let seconds = calls.map(\.seconds).sorted()
             func rate(_ section: String, _ total: Int) -> String { "\(passed[section] ?? 0)/\(total)" }
             var lines = [
-                "Kandong eval — \(backend.label) (asked for readings in app: \(backend.correctsReadings))",
+                "Kandong eval — \(backend.label) (readings: \(CorrectingReadings(base: backend).readingMode.rawValue) here, \(backend.readingMode.rawValue) in the app)",
                 "| 多音字 | kept \(kept), fixed \(fixed.count), missed \(missed.count), invented wrong \(invented.count), errors \(unanswered) (of \(KandongEval.polyphones.count)) |",
                 "| Learn fidelity | \(rate("learn", KandongEval.learnChecks.count)) |",
                 "| Reverse | \(rate("reverse", KandongEval.reverseChecks.count)) |",
@@ -329,11 +330,12 @@ struct KandongEval {
     static func format(_ seconds: Double) -> String { String(format: "%.1fs", seconds) }
 }
 
-/// Asks the Backend for reading corrections even when the app wouldn't.
+/// Asks the Backend for readings in `KANDONG_EVAL_READINGS` mode (`free` unless set to `choose`),
+/// whatever the app would.
 private struct CorrectingReadings: AIBackend {
     let base: AIBackend
     var label: String { base.label }
-    var correctsReadings: Bool { true }
+    var readingMode: ReadingMode { ReadingMode(rawValue: ProcessInfo.processInfo.environment["KANDONG_EVAL_READINGS"] ?? "") ?? .free }
     func supportsImages() async -> Bool { await base.supportsImages() }
     func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> { base.respond(to: request) }
 }

@@ -199,8 +199,8 @@ final class AppModel {
 
     func backend(for config: BackendConfig) -> AIBackend {
         switch config.type {
-        case .appleIntelligence: AppleIntelligenceBackend()
-        case .codex: CodexBackend(settings: settings.codex)
+        case .appleIntelligence: AppleIntelligenceBackend(readingMode: config.readingMode)
+        case .codex: CodexBackend(settings: settings.codex, readingMode: config.readingMode)
         case .openAICompatible: OpenAICompatibleBackend(config: config, apiKey: Keychain.read(config.keychainAccount))
         }
     }

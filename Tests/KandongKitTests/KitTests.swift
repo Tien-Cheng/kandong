@@ -69,6 +69,18 @@ import Testing
         #expect(parsed.readingCorrections.first?.pinyin == "liǎo")
     }
 
+    @Test func dropsTheFormatAppleEchoes() {
+        let english = "Build local multimodal agents"
+        #expect(Prompts.withoutFormatEcho("构建本地多模态代理\n响应使用以下JSON格式：{\"type\": \"object\"}", source: english) == "构建本地多模态代理")
+        #expect(Prompts.withoutFormatEcho("构建本地多模态代理\n{\"type\": \"object\"}", source: english) == "构建本地多模态代理")
+        let steps = "第一步：保存文件。\n第二步：使用JSON格式。\n第三步：发送文件。"
+        #expect(Prompts.withoutFormatEcho(steps, source: "Step one: save the file.\nStep two: use JSON format.\nStep three: send it.") == steps)
+        let config = "请使用此配置：\n{\"type\":\"object\"}\n然后重启。"
+        #expect(Prompts.withoutFormatEcho(config, source: "Use this config:\n{\"type\":\"object\"}\nthen restart.") == config)
+        #expect(Prompts.withoutFormatEcho("第一行\n第二行用JSON格式", source: "First line\nsecond line") == "第一行\n第二行用JSON格式",
+                "only the framework's own wording counts as an echo")
+    }
+
     @Test func rejectsReplyWithoutJSON() {
         #expect(throws: BackendError.self) { try Prompts.parseLearn("no idea") }
     }
@@ -84,7 +96,7 @@ import Testing
 
     @Test func translationOnlyLeavesOutReadings() throws {
         let analysis = OfflineAnalysis(source: "微信", segments: [Segment(id: 0, kind: .word, text: "微信", original: "微信", syllables: [Syllable(text: "wēi", tone: 1), Syllable(text: "xìn", tone: 4)])])
-        let request = Prompts.learn(text: "微信", analysis: analysis, context: "", terms: [], askForReadings: false)
+        let request = Prompts.learn(text: "微信", analysis: analysis, context: "", terms: [], readings: .off)
         #expect(!request.user.contains("[wēi xìn]"))
         #expect(!request.system.contains("readingCorrections"))
         #expect(request.schema == Prompts.translationSchema)
@@ -99,6 +111,63 @@ import Testing
 
 @Suite(.enabled(if: TestData.hasDictionary, "run scripts/fetch-data.sh"))
 struct CorrectionTests {
+    @Test func offersEachAmbiguousWordItsDictionaryReadings() throws {
+        let analysis = TestData.analyzer!.analyze("我还没吃饭，请把书还给我。")
+        let request = Prompts.learn(text: analysis.source, analysis: analysis, context: "", terms: [], readings: .choose)
+        let choices = ReadingChoice.all(in: analysis)
+        #expect(choices.filter { $0.word == "还" }.count == 2, "each 还 gets its own choice: \(choices)")
+        #expect(choices.allSatisfy { $0.options.count > 1 })
+        #expect(request.user.contains("\(choices[0].key) \(choices[0].word): \(choices[0].options.joined(separator: " | "))"))
+        let schema = try #require(request.schema)
+        #expect(schema["properties"]?["readings"]?["properties"]?[choices[0].key]?["enum"] == .array(choices[0].options.map { .string($0) }))
+        #expect(!request.user.contains("Dictionary pinyin"), "only the ambiguous words are sent")
+
+        let plain = TestData.analyzer!.analyze("微信")
+        #expect(Prompts.learn(text: "微信", analysis: plain, context: "", terms: [], readings: .choose).schema == Prompts.translationSchema,
+                "nothing to choose: just translate")
+    }
+
+    @Test func asksOnlyWithTheWholeTextAndOffersEveryOccurrence() throws {
+        let analysis = TestData.analyzer!.analyze("请把书还给我。我还没吃饭。")
+        let part = Prompts.learn(text: "请把书还给我。", analysis: analysis, context: "", terms: [], readings: .choose)
+        #expect(part.schema == Prompts.translationSchema, "a part isn't asked about the whole text's words")
+        let long = TestData.analyzer!.analyze(String(repeating: "我还没吃饭。", count: 40))
+        let choices = ReadingChoice.all(in: long)
+        #expect(choices.filter { $0.word == "还" }.count == 40, "every occurrence is offered")
+    }
+
+    @Test func appliesOnlyTheAnswerTheModeAsksFor() async throws {
+        let analyzer = TestData.analyzer!
+        let engine = LookupEngine(analyzer: analyzer, workspace: Workspace(path: NSTemporaryDirectory()))
+        let analysis = analyzer.analyze("我还没吃饭。")
+        let key = try #require(ReadingChoice.all(in: analysis).first { $0.word == "还" }).key
+        // A server ignoring the schema answers both ways, one of them made up.
+        let reply = #"{"translation": "I haven't eaten yet.", "readings": {"\#(key)": "hái"}, "readingCorrections": [{"word": "还", "pinyin": "hài"}]}"#
+        func reading(_ mode: ReadingMode) async throws -> String? {
+            try await engine.learn(analysis, backend: CannedBackend(reply: reply, readingMode: mode)).analysis.words.first { $0.text == "还" }?.pinyin
+        }
+        #expect(try await reading(.choose) == "hái")
+        #expect(try await reading(.off) == analysis.words.first { $0.text == "还" }?.pinyin)
+        #expect(try await reading(.free) == "hài", "free mode takes the model's word, as it always did")
+    }
+
+    @Test func appliesChosenReadingsPerOccurrence() throws {
+        let analyzer = TestData.analyzer!
+        let engine = LookupEngine(analyzer: analyzer, workspace: Workspace(path: NSTemporaryDirectory()))
+        let analysis = analyzer.analyze("我还没吃饭，请把书还给我。")
+        let both = ReadingChoice.all(in: analysis).filter { $0.word == "还" }
+        let first = try #require(both.first), second = try #require(both.last)
+        let chosen = engine.applyReadings([first.key: "hái", second.key: "huán", "w999": "x"], to: analysis)
+        let readings = chosen.words.filter { $0.text == "还" }.map(\.pinyin)
+        #expect(readings == ["hái", "huán"])
+        let changed = chosen.words.filter { $0.text == "还" && $0.readingCorrected }
+        #expect(changed.count == 1, "only the one that differs from the dictionary is marked")
+
+        let invented = engine.applyReadings([first.key: "hài"], to: analysis)
+        #expect(invented.words.first { $0.text == "还" }?.pinyin == analysis.words.first { $0.text == "还" }?.pinyin,
+                "a reading the dictionary doesn't have is ignored")
+    }
+
     @Test func appliesContextualCorrection() throws {
         let analyzer = TestData.analyzer!
         let engine = LookupEngine(analyzer: analyzer, workspace: Workspace(path: NSTemporaryDirectory()))
@@ -514,5 +583,38 @@ extension OpenAICompatibleTests {
         #expect(MarkdownLines.parse("third tone **.") == [.paragraph("third tone .")])
         #expect(MarkdownLines.parse("-5 degrees") == [.paragraph("-5 degrees")])
         #expect(MarkdownLines.parse("• item") == [.bullet(level: 0, text: "item")])
+    }
+}
+
+/// Answers every request with the same reply.
+struct CannedBackend: AIBackend {
+    let reply: String
+    var readingMode: ReadingMode = .free
+    var label: String { "Canned" }
+    func supportsImages() async -> Bool { false }
+    func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { $0.yield(reply); $0.finish() }
+    }
+}
+
+@Suite struct ReadingModeSettingTests {
+    @Test func keepsAnExplicitChoiceAndFollowsTheDefaultOtherwise() throws {
+        var config = BackendConfig.openAI(.other)
+        config.openAI?.baseURL = "http://localhost:8080/v1"
+        #expect(config.readingMode == .choose)
+        config.readingMode = .choose
+        let saved = try JSONDecoder().decode(BackendConfig.self, from: JSONEncoder().encode(config))
+        var moved = saved
+        moved.openAI?.baseURL = "https://example.org/v1"
+        #expect(moved.readingMode == .choose, "an explicit choice survives the default changing")
+        var following = BackendConfig.openAI(.other)
+        following.openAI?.baseURL = "https://example.org/v1"
+        #expect(following.readingMode == .free)
+    }
+
+    @Test func toleratesAModeFromANewerVersion() throws {
+        let json = #"{"id":"x","name":"X","type":"openAICompatible","preset":"other","openAI":{"baseURL":"https://example.org/v1"},"readingModeSetting":"telepathy"}"#
+        let config = try JSONDecoder().decode(BackendConfig.self, from: Data(json.utf8))
+        #expect(config.readingModeSetting == nil && config.readingMode == .free)
     }
 }

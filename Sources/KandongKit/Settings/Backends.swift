@@ -46,6 +46,26 @@ public enum OpenAIPreset: String, Codable, CaseIterable, Sendable, Identifiable 
     }
 }
 
+/// How a Backend may change the dictionary's readings (多音字) for the context.
+public enum ReadingMode: String, Codable, CaseIterable, Sendable, Identifiable {
+    /// The dictionary's readings stand.
+    case off
+    /// For each word with more than one reading, the model picks one of the dictionary's.
+    case choose
+    /// The model names any reading it thinks is wrong and gives the right one.
+    case free
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .off: "Off — keep the dictionary's"
+        case .choose: "Choose among the dictionary's readings"
+        case .free: "Correct freely"
+        }
+    }
+}
+
 /// One AI endpoint the user can choose for Lookups.
 public struct BackendConfig: Codable, Hashable, Sendable, Identifiable {
     public var id: String
@@ -54,6 +74,9 @@ public struct BackendConfig: Codable, Hashable, Sendable, Identifiable {
     /// For OpenAI-compatible Backends: what they were set up as.
     public var preset: OpenAIPreset?
     public var openAI: OpenAISettings?
+    /// The user's choice; nil follows `defaultReadingMode`, which may change with the Backend's URL or
+    /// a later release.
+    public var readingModeSetting: ReadingMode?
 
     public init(id: String, name: String, type: BackendType, preset: OpenAIPreset? = nil, openAI: OpenAISettings? = nil) {
         self.id = id
@@ -76,6 +99,24 @@ public struct BackendConfig: Codable, Hashable, Sendable, Identifiable {
     public var isBuiltIn: Bool { type != .openAICompatible }
 
     public var isLMStudio: Bool { preset == .lmStudio }
+
+    /// How this Backend may change readings.
+    public var readingMode: ReadingMode {
+        get { readingModeSetting ?? defaultReadingMode }
+        set { readingModeSetting = newValue }
+    }
+
+    /// From `KandongEval` (39 多音字 sentences, 12 the dictionary gets wrong): Apple Intelligence and
+    /// Gemma 4 E4B fix none freely but 4 and 9 when choosing among the dictionary's readings; Codex
+    /// fixes all 12 freely and 11 choosing (一行 has no right option). Small models on this Mac choose;
+    /// large hosted ones correct freely.
+    public var defaultReadingMode: ReadingMode {
+        switch type {
+        case .appleIntelligence: .choose
+        case .codex: .free
+        case .openAICompatible: isOnDevice ? .choose : .free
+        }
+    }
 
     /// How much an OpenAI-compatible Backend's model thinks per task.
     public var reasoning: ReasoningSettings {
@@ -100,3 +141,19 @@ public struct BackendConfig: Codable, Hashable, Sendable, Identifiable {
 
 /// Keychain accounts renamed when Backends became a list; moved once at launch.
 public let legacyKeychainAccounts: [(from: String, to: String)] = [("custom-api-key", "api-key-custom")]
+
+extension BackendConfig {
+    private enum CodingKeys: String, CodingKey { case id, name, type, preset, openAI, readingModeSetting }
+
+    // A reading mode this version doesn't know (from a newer one) falls back to the default rather
+    // than losing the Backend.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        type = try c.decode(BackendType.self, forKey: .type)
+        preset = try c.decodeIfPresent(OpenAIPreset.self, forKey: .preset)
+        openAI = try c.decodeIfPresent(OpenAISettings.self, forKey: .openAI)
+        readingModeSetting = (try? c.decodeIfPresent(String.self, forKey: .readingModeSetting)).flatMap { $0.flatMap(ReadingMode.init(rawValue:)) }
+    }
+}
