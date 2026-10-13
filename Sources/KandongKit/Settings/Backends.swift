@@ -3,7 +3,7 @@ import Foundation
 /// How Kandong talks to a Backend.
 public enum BackendType: String, Codable, Sendable {
     case appleIntelligence
-    case codex
+    case chatGPT
     case openAICompatible
 }
 
@@ -87,7 +87,7 @@ public struct BackendConfig: Codable, Hashable, Sendable, Identifiable {
     }
 
     public static let appleIntelligence = BackendConfig(id: "apple-intelligence", name: "Apple Intelligence", type: .appleIntelligence)
-    public static let codex = BackendConfig(id: "codex", name: "Codex", type: .codex)
+    public static let chatGPT = BackendConfig(id: "chatgpt", name: "ChatGPT", type: .chatGPT)
 
     /// A new OpenAI-compatible Backend from a preset.
     public static func openAI(_ preset: OpenAIPreset, id: String = UUID().uuidString.lowercased(), name: String? = nil) -> BackendConfig {
@@ -95,7 +95,7 @@ public struct BackendConfig: Codable, Hashable, Sendable, Identifiable {
                       openAI: OpenAISettings(baseURL: preset.baseURL))
     }
 
-    /// Apple Intelligence and Codex are always there; the user adds and removes the rest.
+    /// Apple Intelligence and ChatGPT are always there; the user adds and removes the rest.
     public var isBuiltIn: Bool { type != .openAICompatible }
 
     public var isLMStudio: Bool { preset == .lmStudio }
@@ -113,7 +113,7 @@ public struct BackendConfig: Codable, Hashable, Sendable, Identifiable {
     public var defaultReadingMode: ReadingMode {
         switch type {
         case .appleIntelligence: .choose
-        case .codex: .free
+        case .chatGPT: .free
         case .openAICompatible: isOnDevice ? .choose : .free
         }
     }
@@ -131,7 +131,7 @@ public struct BackendConfig: Codable, Hashable, Sendable, Identifiable {
     public var isOnDevice: Bool {
         switch type {
         case .appleIntelligence: return true
-        case .codex: return false
+        case .chatGPT: return false
         case .openAICompatible:
             guard let host = openAI.flatMap({ URL(string: $0.baseURL) })?.host else { return false }
             return ["localhost", "127.0.0.1", "::1", "[::1]"].contains(host)
@@ -149,6 +149,11 @@ extension BackendConfig {
     // than losing the Backend.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        if try c.decode(String.self, forKey: .type) == "codex" {
+            self = .chatGPT
+            readingModeSetting = (try? c.decodeIfPresent(String.self, forKey: .readingModeSetting)).flatMap { $0.flatMap(ReadingMode.init(rawValue:)) }
+            return
+        }
         id = try c.decode(String.self, forKey: .id)
         name = try c.decode(String.self, forKey: .name)
         type = try c.decode(BackendType.self, forKey: .type)

@@ -14,7 +14,7 @@ enum PanelSnapshots {
         let lmStudio = BackendConfig.openAI(.lmStudio, id: "lmstudio", name: "LM Studio")
         for scenario in scenarios {
             var settings = AppSettings()
-            settings.backends = [.appleIntelligence, .codex, lmStudio]
+            settings.backends = [.appleIntelligence, .chatGPT, lmStudio]
             settings.myLevel = scenario.myLevel
             settings.hasChosenLevel = scenario.myLevel != 0
             let workspace = FileManager.default.temporaryDirectory.appendingPathComponent("kandong-snapshot-\(UUID().uuidString)")

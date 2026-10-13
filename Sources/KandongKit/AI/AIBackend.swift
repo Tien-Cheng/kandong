@@ -33,6 +33,8 @@ public struct AIRequest: Sendable {
 
 /// One thing the user can do to make a Backend ready.
 public enum FixAction: Equatable, Sendable {
+    /// Opens Kandong's ChatGPT connection flow; no terminal setup is needed.
+    case connectChatGPT
     case openURL(URL, label: String)
     /// A command to paste into Terminal.
     case copyCommand(String, label: String)
@@ -40,6 +42,7 @@ public enum FixAction: Equatable, Sendable {
 
     public var label: String {
         switch self {
+        case .connectChatGPT: "Continue with ChatGPT"
         case .openURL(_, let label), .copyCommand(_, let label), .openApp(_, let label): label
         }
     }
@@ -70,7 +73,7 @@ public enum BackendStatus: Equatable, Sendable {
 
 /// The AI answering a Lookup.
 public protocol AIBackend: Sendable {
-    /// Short label for the panel badge, e.g. "Codex · gpt-6.1-sol".
+    /// Short label for the panel badge, e.g. "ChatGPT · gpt-6.1-sol".
     var label: String { get }
     func supportsImages() async -> Bool
     /// How this Backend may change dictionary readings for the context (多音字).
@@ -121,12 +124,9 @@ extension AIBackend {
 }
 
 public enum BackendError: LocalizedError, Equatable {
-    case codexNotInstalled
-    case codexNotSignedIn
     case serverUnavailable(name: String, url: String, hint: String)
     case noModel(name: String, hint: String)
     case http(status: Int, body: String)
-    case protocolError(String)
     case failed(String)
     case badResponse(String)
     case appleIntelligenceUnavailable(AppleIntelligenceUnavailability)
@@ -145,18 +145,12 @@ public enum BackendError: LocalizedError, Equatable {
 
     public var errorDescription: String? {
         switch self {
-        case .codexNotInstalled:
-            "Codex CLI not found. Install it with `brew install codex` (or set its path in Settings)."
-        case .codexNotSignedIn:
-            "Codex is not signed in. Run `codex login` in a terminal."
         case .serverUnavailable(let name, let url, let hint):
             "\(name) isn't reachable at \(url). \(hint)"
         case .noModel(let name, let hint):
             "\(name) has no model available. \(hint)"
         case .http(let status, let body):
             "The AI server returned HTTP \(status): \(body.prefix(300))"
-        case .protocolError(let message):
-            "Unexpected reply from Codex: \(message)"
         case .failed(let message):
             message
         case .badResponse(let message):

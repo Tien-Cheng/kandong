@@ -53,7 +53,7 @@ import Testing
     }
 
     @Test func storedSettingsGainPerTaskThinking() throws {
-        // Before thinking was per task: no `reasoning`, one Codex effort.
+        // Before thinking was per task, backend settings had no `reasoning`.
         let config = try JSONDecoder().decode(BackendConfig.self, from: Data(#"""
         {"id":"lmstudio","name":"LM Studio","type":"openAICompatible","preset":"lmStudio","openAI":{"baseURL":"http://localhost:1234/v1"}}
         """#.utf8))
@@ -62,10 +62,6 @@ import Testing
         #expect(hosted.reasoning == .modelDefault)
         hosted.reasoning.explain = "high"
         #expect(hosted.openAI?.reasoning == ReasoningSettings(translate: "", explain: "high"))
-
-        let codex = try JSONDecoder().decode(CodexSettings.self, from: Data(#"{"effort":"medium"}"#.utf8))
-        #expect(codex.effort == "medium" && codex.explainEffort == "medium")
-        #expect(CodexSettings().explainEffort == "low")
     }
 }
 

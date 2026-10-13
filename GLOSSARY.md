@@ -56,11 +56,11 @@ Free-text description of the user and what they read, sent with every AI request
 _Avoid_: Profile, system prompt
 
 **Backend**:
-One AI endpoint the user can choose to answer Lookups, e.g. "Apple Intelligence", "Codex" or "Ollama · qwen3". The user can add several. The *Default backend* answers normally; the *Local backend*, which must run on this Mac, answers when the user holds ⇧.
+One AI endpoint the user can choose to answer Lookups, e.g. "Apple Intelligence", "ChatGPT" or "Ollama · qwen3". The user can add several. The *Default backend* answers normally; the *Local backend*, which must run on this Mac, answers when the user holds ⇧.
 _Avoid_: Provider, model
 
 **Backend type**:
-How Kandong talks to a Backend: *Apple Intelligence* (Apple's model on this Mac), *Codex*, or *OpenAI-compatible* (LM Studio, Ollama, hosted APIs). Apple Intelligence and Codex exist once each; OpenAI-compatible Backends are added from presets.
+How Kandong connects to AI: *Apple Intelligence* (on this Mac), *ChatGPT* (a connected ChatGPT plan), or *OpenAI-compatible* (LM Studio, Ollama, hosted APIs). Apple Intelligence and ChatGPT exist once each; OpenAI-compatible Backends are added from presets.
 
 **Thinking**:
 How much a model reasons before it answers, set per Backend for translating and for explaining (off, low, … high, or the model's default).

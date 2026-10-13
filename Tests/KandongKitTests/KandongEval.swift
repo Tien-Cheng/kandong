@@ -11,10 +11,9 @@ private let evalEnabled = ProcessInfo.processInfo.environment["KANDONG_LIVE"] ==
 ///
 ///     KANDONG_LIVE=1 KANDONG_EVAL_BACKEND=lmstudio:google/gemma-4-e4b swift test --filter KandongEval
 ///
-/// `KANDONG_EVAL_BACKEND` is `apple` (the default), `codex`, or `lmstudio:<model id>` (LM Studio at localhost:1234);
+/// `KANDONG_EVAL_BACKEND` is `apple` (the default) or `lmstudio:<model id>` (LM Studio at localhost:1234);
 /// `KANDONG_EVAL_READINGS` is `free` (the default) or `choose`, the `ReadingMode` used for 多音字;
-/// `KANDONG_EVAL_TIMEOUT` caps each call (seconds, default 90). A timed-out Codex call isn't interrupted (the Codex
-/// Backend doesn't stop a running turn), so it may keep running while the next case starts.
+/// `KANDONG_EVAL_TIMEOUT` caps each call (seconds, default 90).
 ///
 /// Apple Intelligence on macOS 27.0.1 (AFM 3 Core Advanced) fixed 1 多音字, missed 2–3 and turned 1–3 readings
 /// wrong (e.g. 还给 huán → hái) over two runs, which is why it doesn't correct readings by default.
@@ -27,7 +26,6 @@ struct KandongEval {
     static func backend(named name: String) -> AIBackend? {
         switch name {
         case "apple": return AppleIntelligenceBackend()
-        case "codex": return CodexBackend(settings: CodexSettings())
         case _ where name.hasPrefix("lmstudio:"):
             var config = BackendConfig.openAI(.lmStudio, id: "lmstudio")
             config.openAI?.model = String(name.dropFirst("lmstudio:".count))
@@ -98,7 +96,7 @@ struct KandongEval {
 
     @Test func eval() async throws {
         guard let backend = Self.backend(named: Self.backendName) else {
-            Issue.record("Unknown KANDONG_EVAL_BACKEND \(Self.backendName): use apple, codex or lmstudio:<model id>")
+            Issue.record("Unknown KANDONG_EVAL_BACKEND \(Self.backendName): use apple or lmstudio:<model id>")
             return
         }
         let workspace = Workspace(folder: FileManager.default.temporaryDirectory.appendingPathComponent("kandong-eval-\(UUID().uuidString)"))
