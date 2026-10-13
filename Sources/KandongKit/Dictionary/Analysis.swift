@@ -78,10 +78,11 @@ public struct OfflineAnalysis: Hashable, Codable, Sendable {
     public var containsTraditional: Bool { segments.contains(where: \.isTraditional) }
     public var simplifiedText: String { segments.map(\.text).joined() }
 
-    /// Unique words in reading order, for the Word breakdown.
+    /// Unique words in reading order, for the Word breakdown. A word read two ways (还 hái, 还 huán)
+    /// appears once per reading.
     public var uniqueWords: [Segment] {
         var seen = Set<String>()
-        return words.filter { seen.insert($0.text).inserted }
+        return words.filter { seen.insert($0.text + " " + $0.pinyin.lowercased()).inserted }
     }
 }
 

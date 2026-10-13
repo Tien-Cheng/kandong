@@ -46,7 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             switch url.host {
             case "lookup":
                 if let text = query.first(where: { $0.name == "text" })?.value, !text.isEmpty {
-                    model.lookup(text: text, source: .clipboard, local: local,
+                    model.lookup(text: text, source: .otherApp, local: local,
                                  anchor: CGRect(origin: NSEvent.mouseLocation, size: .zero))
                 }
             case "clipboard": model.perform(.lookupClipboard, local: local)

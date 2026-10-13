@@ -39,17 +39,23 @@ struct SettingsView: View {
 
     private var learningSection: some View {
         Section {
-            Picker("My level", selection: $model.settings.myLevel) {
+            Picker("My level", selection: Binding(get: { model.settings.myLevel }, set: {
+                model.settings.myLevel = $0
+                model.settings.hasChosenLevel = true
+            })) {
                 Text("Off — show everything").tag(0)
                 ForEach(1...7, id: \.self) { Text(HSKTable.label(for: $0)).tag($0) }
             }
             Toggle("Pinyin only for words above my level", isOn: $model.settings.pinyinForUnknownOnly)
                 .disabled(model.settings.myLevel == 0)
-            Toggle("Always explain (uses more AI quota)", isOn: $model.settings.alwaysExplain)
+            Picker("Chinese typeface", selection: $model.settings.readingTypeface) {
+                ForEach(ReadingTypeface.allCases) { Text($0.displayName).tag($0) }
+            }
+            Toggle("Always explain", isOn: $model.settings.alwaysExplain)
         } header: {
             Text("Learning")
         } footer: {
-            Text("Words at or below your HSK level are folded away in the word list, so new words stand out.")
+            Text("Words at or below your HSK level are folded away in the word list, so new words stand out. LXGW WenKai is a clear regular-script face that shows each stroke; PingFang is what most apps use. Always explain asks the AI for more with every Lookup, which is slower and, on hosted Backends, uses more quota.")
         }
     }
 
@@ -122,12 +128,30 @@ struct SettingsView: View {
 
     private var historySection: some View {
         Section {
-            Stepper("Keep history for \(model.settings.historyRetentionDays) days",
-                    value: $model.settings.historyRetentionDays, in: 7...3650, step: 30)
+            Picker("Keep history for", selection: $model.settings.historyRetentionDays) {
+                ForEach(Self.retentionChoices(including: model.settings.historyRetentionDays), id: \.self) { days in
+                    Text(Self.retentionLabel(days)).tag(days)
+                }
+            }
         } header: {
             Text("History")
         } footer: {
             Text("Lookups and how often you meet saved words are kept on this Mac only.")
+        }
+    }
+
+    private static func retentionChoices(including current: Int) -> [Int] {
+        Array(Set([7, 30, 90, 180, 365, 730, 3650, current])).sorted()
+    }
+
+    private static func retentionLabel(_ days: Int) -> String {
+        switch days {
+        case 7: "1 week"
+        case 30: "1 month"
+        case 365: "1 year"
+        case 730: "2 years"
+        case 3650: "10 years"
+        default: days % 30 == 0 ? "\(days / 30) months" : "\(days) days"
         }
     }
 

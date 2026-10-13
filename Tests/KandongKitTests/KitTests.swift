@@ -168,6 +168,23 @@ struct CorrectionTests {
                 "a reading the dictionary doesn't have is ignored")
     }
 
+    @Test func correctedReadingTakesThatReadingsMeaning() throws {
+        let analyzer = TestData.analyzer!
+        let engine = LookupEngine(analyzer: analyzer, workspace: Workspace(path: NSTemporaryDirectory()))
+        let analysis = analyzer.analyze("他还没还我钱。")
+        let both = ReadingChoice.all(in: analysis).filter { $0.word == "还" }
+        let first = try #require(both.first), second = try #require(both.last)
+        let chosen = engine.applyReadings([first.key: "hái", second.key: "huán"], to: analysis)
+        let words = chosen.words.filter { $0.text == "还" }
+        #expect(words.first?.definitions.first == "still", "hái means still, not huán's to pay back")
+        #expect(words.last?.definitions.first == "to pay back")
+        #expect(chosen.uniqueWords.filter { $0.text == "还" }.map(\.pinyin) == ["hái", "huán"],
+                "each reading gets its own row in the Word breakdown")
+
+        let corrected = engine.applyCorrections([.init(word: "还", pinyin: "hái")], to: analyzer.analyze("还"))
+        #expect(corrected.words.first?.definitions.first == "still")
+    }
+
     @Test func appliesContextualCorrection() throws {
         let analyzer = TestData.analyzer!
         let engine = LookupEngine(analyzer: analyzer, workspace: Workspace(path: NSTemporaryDirectory()))
@@ -616,5 +633,22 @@ struct CannedBackend: AIBackend {
         let json = #"{"id":"x","name":"X","type":"openAICompatible","preset":"other","openAI":{"baseURL":"https://example.org/v1"},"readingModeSetting":"telepathy"}"#
         let config = try JSONDecoder().decode(BackendConfig.self, from: Data(json.utf8))
         #expect(config.readingModeSetting == nil && config.readingMode == .free)
+    }
+}
+
+@Suite struct DirectionTests {
+    @Test func mixedTextCanGoEitherWay() {
+        #expect(Direction.isMixed("这个 feature 明天 ship 吗？"))
+        #expect(!Direction.isMixed("你好"), "all Chinese")
+        #expect(!Direction.isMixed("Hello there"), "all English")
+        #expect(!Direction.isMixed("@张三 看 https://example.com #AI 2026"), "mentions, links, tags and numbers aren't English to translate")
+        #expect(Direction.learn.flipped == .reverse)
+    }
+
+    @Test func settingsFromBeforeTheLevelQuestion() throws {
+        let decode = { (json: String) in try JSONDecoder().decode(AppSettings.self, from: Data(json.utf8)) }
+        #expect(try decode(#"{"myLevel": 3}"#).hasChosenLevel, "a level already set counts as answered")
+        #expect(try !decode(#"{"myLevel": 0}"#).hasChosenLevel)
+        #expect(try decode("{}").readingTypeface == .kai)
     }
 }

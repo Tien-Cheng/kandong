@@ -161,6 +161,8 @@ public enum Prompts {
     You help an English-speaking learner say things in Chinese. Translate the user's English into \
     natural Simplified Chinese as a native speaker would write it, matching the user's tone. \
     Keep @mentions, hashtags and URLs unchanged. Use the user's Terms exactly. \
+    If the text already mixes in some Chinese, keep that Chinese and translate the rest, so the \
+    whole reply reads as natural Chinese. \
     Reply with one JSON object and nothing else: {"chinese": string, "note": string}. \
     note: one short sentence in English on how formal or casual it sounds, or a common alternative \
     phrasing; "" if nothing useful. You MUST write the note in English.

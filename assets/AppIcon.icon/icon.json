@@ -1,0 +1,84 @@
+{
+  "fill-specializations" : [
+    {
+      "value" : {
+        "linear-gradient" : [
+          "srgb:0.16471,0.19608,0.27059,1.00000",
+          "srgb:0.07843,0.09412,0.12941,1.00000"
+        ],
+        "orientation" : {
+          "start" : { "x" : 0.5, "y" : 0 },
+          "stop" : { "x" : 0.5, "y" : 0.7 }
+        }
+      }
+    },
+    {
+      "appearance" : "dark",
+      "value" : {
+        "linear-gradient" : [
+          "srgb:0.10196,0.12157,0.16863,1.00000",
+          "srgb:0.03529,0.04314,0.06275,1.00000"
+        ],
+        "orientation" : {
+          "start" : { "x" : 0.5, "y" : 0 },
+          "stop" : { "x" : 0.5, "y" : 0.7 }
+        }
+      }
+    }
+  ],
+  "groups" : [
+    {
+      "name" : "Tone mark",
+      "layers" : [
+        {
+          "name" : "2-tone",
+          "image-name" : "2-tone.svg",
+          "glass" : true,
+          "fill-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : { "solid" : "srgb:0.30196,0.55686,1.00000,1.00000" }
+            },
+            {
+              "appearance" : "tinted",
+              "value" : { "solid" : "srgb:1.00000,1.00000,1.00000,1.00000" }
+            }
+          ]
+        }
+      ],
+      "lighting" : "individual",
+      "shadow" : { "kind" : "neutral", "opacity" : 0.5 },
+      "specular" : true,
+      "specular-highlight-placement" : "automatic",
+      "refractivity" : { "enabled" : true, "strength" : 0.25, "depth" : 0.3 },
+      "translucency" : { "enabled" : true, "value" : 0.3 }
+    },
+    {
+      "name" : "Glyph",
+      "layers" : [
+        {
+          "name" : "1-glyph",
+          "image-name" : "1-glyph.svg",
+          "glass" : true,
+          "fill-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : { "solid" : "srgb:0.92549,0.90196,0.85490,1.00000" }
+            }
+          ],
+          "opacity-specializations" : [
+            { "appearance" : "tinted", "value" : 0.8 }
+          ]
+        }
+      ],
+      "lighting" : "individual",
+      "shadow" : { "kind" : "neutral", "opacity" : 0.5 },
+      "specular" : true,
+      "specular-highlight-placement" : "automatic",
+      "translucency" : { "enabled" : true, "value" : 0.2 }
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : [ "macOS" ]
+  }
+}

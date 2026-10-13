@@ -158,7 +158,8 @@ private struct BackendDetail: View {
                 HStack {
                     Text(testResult.isEmpty ? (model.statuses[config.id]?.message ?? "Checking…") : testResult)
                         .foregroundStyle(.secondary).lineLimit(3).textSelection(.enabled)
-                    Spacer()
+                        .multilineTextAlignment(.trailing)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
                     if let fix = model.statuses[config.id]?.fix {
                         Button(model.title(for: fix)) { model.perform(fix) }
                     }

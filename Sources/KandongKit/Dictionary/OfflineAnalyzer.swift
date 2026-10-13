@@ -316,14 +316,32 @@ public final class OfflineAnalyzer: Sendable {
             definitions: entry?.source == nil ? entry?.definitions ?? [] : [], hskLevel: hsk.level(of: piece.text),
             alternativeReadings: alternatives
         )
-        // Only senses read the way the word is read here: ETO's 重大 chóng dà "Chongqing University" isn't
-        // 重大 zhòng dà "major".
-        for addOn in dictionary.entries(for: piece.text) where Pinyin.display(addOn.syllables).lowercased() == chosen.lowercased() {
+        segment.addOnGlosses = addOnGlosses(for: piece.text, read: chosen)
+        return segment
+    }
+
+    /// The word read another way, with that reading's meaning: 还 hái is "still", not huán's "to pay back".
+    public func reread(_ segment: Segment, as syllables: [Syllable]) -> Segment {
+        var result = segment
+        result.syllables = syllables
+        let entry = dictionary.bestEntry(for: segment.text, reading: syllables)
+        if let entry, entry.source == nil, entry.foldedPinyin == Pinyin.folded(Pinyin.display(syllables)) {
+            result.definitions = entry.definitions
+        }
+        result.addOnGlosses = addOnGlosses(for: segment.text, read: Pinyin.display(syllables))
+        return result
+    }
+
+    /// Only senses read the way the word is read here: ETO's 重大 chóng dà "Chongqing University" isn't
+    /// 重大 zhòng dà "major".
+    private func addOnGlosses(for word: String, read reading: String) -> [AddOnGloss] {
+        var glosses: [AddOnGloss] = []
+        for addOn in dictionary.entries(for: word) where Pinyin.display(addOn.syllables).lowercased() == reading.lowercased() {
             guard let source = addOn.source else { continue }
-            for text in addOn.definitions where !segment.addOnGlosses.contains(where: { $0.text == text }) {
-                segment.addOnGlosses.append(AddOnGloss(source: source, text: text))
+            for text in addOn.definitions where !glosses.contains(where: { $0.text == text }) {
+                glosses.append(AddOnGloss(source: source, text: text))
             }
         }
-        return segment
+        return glosses
     }
 }

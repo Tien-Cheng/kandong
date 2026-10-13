@@ -3,5 +3,6 @@ build/
 .swiftpm/
 Data/cedict_ts.u8
 Data/hsk.tsv
+Data/LXGWWenKaiLite-Regular.ttf
 *.xcodeproj
 .DS_Store
