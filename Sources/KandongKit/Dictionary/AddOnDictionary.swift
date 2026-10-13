@@ -44,6 +44,16 @@ public struct AddOnDictionary: Sendable, Identifiable {
         entryCount = count
     }
 
+    /// The add-on files in `folder` with their sizes and dates; it changes when one is added, edited or removed.
+    public static func signature(of folder: URL) -> String {
+        let keys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey]
+        let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: keys)) ?? []
+        return files.filter { ["u8", "txt"].contains($0.pathExtension.lowercased()) }.map { url in
+            let values = try? url.resourceValues(forKeys: Set(keys))
+            return "\(url.lastPathComponent):\(values?.fileSize ?? 0):\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0)"
+        }.sorted().joined(separator: "|")
+    }
+
     /// Every add-on in `folder` (`.u8` or `.txt` files), by name.
     public static func all(in folder: URL) -> [AddOnDictionary] {
         let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
@@ -60,12 +70,13 @@ public struct AddOnDictionary: Sendable, Identifiable {
 public enum ETOGlossary {
     public static let id = "eto-technical-terms"
     public static let name = "Technical terms (CSET-ETO Chinese Technical Glossary)"
-    public static let license = "CC BY-NC 4.0. Ben Murphy, \"CSET-ETO Chinese Technical Glossary\", https://glossary.eto.tech. Converted to CC-CEDICT format by Kandong."
+    public static let license = "CC BY-NC 4.0 (https://creativecommons.org/licenses/by-nc/4.0/). Ben Murphy, \"CSET-ETO Chinese Technical Glossary\", https://glossary.eto.tech. Converted to CC-CEDICT format by Kandong."
     public static let homepage = URL(string: "https://glossary.eto.tech")!
     /// The glossary's own published CSV export.
     public static let csvURL = URL(string: "https://docs.google.com/spreadsheets/d/e/2PACX-1vTO-PtXAf1aL98StTVimx_uzme-oX3FcZQuQVBiGiRI8cvh9l15Vk1cqKWy8Uu6RMGjxsnuTrGmgMJs/pub?output=csv")!
 
-    /// Downloads the glossary and saves it as an add-on in `folder`.
+    /// Downloads the glossary and saves it as an add-on in `folder`. A download much smaller than the
+    /// copy it would replace is refused, in case the sheet came back cut short.
     public static func download(into folder: URL, date: Date = Date()) async throws -> AddOnDictionary {
         var request = URLRequest(url: csvURL)
         request.timeoutInterval = 60
@@ -74,9 +85,13 @@ public enum ETOGlossary {
             throw BackendError.failed("Couldn't download the technical glossary (HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)).")
         }
         let converted = convert(csv: String(decoding: data, as: UTF8.self), date: date)
-        guard converted.count > 1000 else { throw BackendError.failed("The technical glossary download looks incomplete.") }
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let url = folder.appendingPathComponent("\(id).u8")
+        let previous = (try? String(contentsOf: url, encoding: .utf8)).map { AddOnDictionary(url: url, text: $0).entryCount } ?? 0
+        guard converted.count > 1000, converted.count * 2 > previous else {
+            throw BackendError.failed("The technical glossary download looks incomplete (\(converted.count) words); the copy you have is kept.")
+        }
+        try Task.checkCancellation()
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         try converted.text.write(to: url, atomically: true, encoding: .utf8)
         return AddOnDictionary(url: url, text: converted.text)
     }
@@ -88,8 +103,10 @@ public enum ETOGlossary {
         let rows = CSV.parse(csv)
         // A banner comes before the header row.
         guard let headerIndex = rows.firstIndex(where: { $0.first?.lowercased().hasPrefix("chinese term") == true }) else { return ("", 0) }
-        var lines: [String] = []
-        var seen = Set<String>()
+        // One entry per spelling and reading; a term listed twice with different senses (微管:
+        // microtubule, and micropipe) keeps them all.
+        var order: [String] = []
+        var senses: [String: [String]] = [:]
         for row in rows[(headerIndex + 1)...] where row.count >= 4 {
             let english = row[1].trimmingCharacters(in: .whitespacesAndNewlines)
             guard !english.isEmpty, !english.contains("Error retrieving definition") else { continue }
@@ -97,10 +114,15 @@ public enum ETOGlossary {
             let definitions = Self.definitions(english)
             guard !definitions.isEmpty else { continue }
             for (term, reading) in zip(terms, readings) {
-                guard let pinyin = numbered(reading, for: term), seen.insert(term + "|" + pinyin).inserted else { continue }
-                lines.append("\(term) \(term) [\(pinyin)] /\(definitions.joined(separator: "/"))/")
+                guard let pinyin = numbered(reading, for: term) else { continue }
+                let key = "\(term) \(term) [\(pinyin)]"
+                if senses[key] == nil { order.append(key) }
+                for definition in definitions where senses[key]?.contains(definition) != true {
+                    senses[key, default: []].append(definition)
+                }
             }
         }
+        let lines = order.map { "\($0) /\(senses[$0]!.joined(separator: "/"))/" }
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withFullDate]
         let header = [
@@ -122,7 +144,8 @@ public enum ETOGlossary {
             inner = String(inner.dropFirst(marker.count))
         }
         let main = String(text[..<open.lowerBound]).trimmingCharacters(in: .whitespaces)
-        return [main] + inner.split(separator: ";").map { $0.trimmingCharacters(in: .whitespaces) }
+        // Abbreviations are separated by semicolons, sometimes commas.
+        return [main] + inner.split(whereSeparator: { ";,，、；".contains($0) }).map { $0.trimmingCharacters(in: .whitespaces) }
     }
 
     /// "Rock sugar. Alternatives: Crystal sugar, rock candy" → ["Rock sugar", "Crystal sugar", "rock candy"].

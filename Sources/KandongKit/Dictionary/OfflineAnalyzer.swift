@@ -190,7 +190,8 @@ public final class OfflineAnalyzer: Sendable {
     }
 
     /// Joins neighbouring words that make a word only an add-on dictionary has (多 + 摸 → 多摸), which
-    /// the system tokenizer can't know. The longest such word wins.
+    /// the system tokenizer can't know. The longest such word wins. Words CC-CEDICT also has are left
+    /// as the tokenizer split them, since it reads the context.
     private func mergeAddOnWords(_ pieces: [Piece]) -> [Piece] {
         guard dictionary.hasAddOns else { return pieces }
         var result: [Piece] = []
@@ -315,7 +316,9 @@ public final class OfflineAnalyzer: Sendable {
             definitions: entry?.source == nil ? entry?.definitions ?? [] : [], hskLevel: hsk.level(of: piece.text),
             alternativeReadings: alternatives
         )
-        for addOn in dictionary.entries(for: piece.text) {
+        // Only senses read the way the word is read here: ETO's 重大 chóng dà "Chongqing University" isn't
+        // 重大 zhòng dà "major".
+        for addOn in dictionary.entries(for: piece.text) where Pinyin.display(addOn.syllables).lowercased() == chosen.lowercased() {
             guard let source = addOn.source else { continue }
             for text in addOn.definitions where !segment.addOnGlosses.contains(where: { $0.text == text }) {
                 segment.addOnGlosses.append(AddOnGloss(source: source, text: text))

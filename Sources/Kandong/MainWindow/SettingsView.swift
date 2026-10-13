@@ -85,6 +85,7 @@ struct SettingsView: View {
                             Button("Update", action: model.downloadTechnicalTerms).disabled(model.addOnStatus == .working)
                         }
                         Button("Remove") { model.removeAddOn(addOn) }
+                            .disabled(addOn.id == ETOGlossary.id && model.addOnStatus == .working)
                     }
                 } label: {
                     Text(addOn.name)
@@ -105,6 +106,8 @@ struct SettingsView: View {
             }
         } header: {
             Text("Dictionaries")
+                // Pick up files added to the folder since the last load.
+                .task { model.reloadDictionariesIfChanged() }
         } footer: {
             HStack(alignment: .firstTextBaseline) {
                 Text("Add-on dictionaries add words CC-CEDICT doesn't have, like 多模态 (multimodal). They're CC-CEDICT-format files in the Workspace's dictionaries folder; add your own there.")

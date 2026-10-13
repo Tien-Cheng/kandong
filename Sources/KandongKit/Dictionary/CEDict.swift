@@ -22,8 +22,10 @@ public struct DictEntry: Hashable, Sendable {
 public final class CEDict: Sendable {
     private let entries: [DictEntry]
     private let index: [String: [Int]]
-    /// Words that only add-on dictionaries have, or that one gives more of (e.g. a technical term).
+    /// Words only add-on dictionaries have, e.g. technical terms CC-CEDICT lacks.
     private let addOnWords: Set<String>
+    /// The longest word to look for: CC-CEDICT's run to 12 characters, an add-on's (a company's full
+    /// name, say) can be longer.
     public let maxWordLength: Int
 
     public convenience init(contentsOf url: URL, addOns: [AddOnDictionary] = []) throws {
@@ -36,7 +38,7 @@ public final class CEDict: Sendable {
         var index: [String: [Int]] = [:]
         index.reserveCapacity(260_000)
         var addOnWords = Set<String>()
-        var maxLength = 1
+        var maxLength = 1, maxAddOnLength = 1
         let sources = [(name: String?.none, text: text)] + addOns.map { (name: Optional($0.name), text: $0.text) }
         for source in sources {
             for line in source.text.split(whereSeparator: \.isNewline) {
@@ -48,29 +50,36 @@ public final class CEDict: Sendable {
                 if entry.traditional != entry.simplified {
                     index[entry.traditional, default: []].append(id)
                 }
-                if source.name != nil { addOnWords.insert(entry.simplified) }
-                maxLength = max(maxLength, entry.simplified.count)
+                if source.name != nil {
+                    if index[entry.simplified]?.contains(where: { entries[$0].source == nil }) != true { addOnWords.insert(entry.simplified) }
+                    maxAddOnLength = max(maxAddOnLength, entry.simplified.count)
+                } else {
+                    maxLength = max(maxLength, entry.simplified.count)
+                }
             }
         }
         self.entries = entries
         self.index = index
         self.addOnWords = addOnWords
-        self.maxWordLength = min(maxLength, 12)
+        self.maxWordLength = max(min(maxLength, 12), min(maxAddOnLength, 40))
     }
 
     public var hasAddOns: Bool { !addOnWords.isEmpty }
 
-    /// Whether an add-on dictionary has `word`, e.g. a technical term like 多模态.
+    /// Whether only an add-on dictionary has `word`, e.g. a technical term like 多模态. Words CC-CEDICT
+    /// also has (才能) are left to the tokenizer, which tells 才能 "talent" from 才 + 能 "only then can".
     public func isAddOnWord(_ word: String) -> Bool { addOnWords.contains(word) }
 
     static func parse(_ line: Substring) -> DictEntry? {
+        // Add-on files are written by hand, so a line out of shape is skipped, never trusted.
         guard let firstSpace = line.firstIndex(of: " "),
-              let open = line.firstIndex(of: "["),
+              let open = line.firstIndex(of: "["), firstSpace < open,
               let close = line[open...].firstIndex(of: "]"),
               let slash = line[close...].firstIndex(of: "/")
         else { return nil }
         let traditional = line[..<firstSpace]
         let simplified = line[line.index(after: firstSpace)..<open].trimmingCharacters(in: .whitespaces)
+        guard !traditional.isEmpty, !simplified.isEmpty, !simplified.contains(" ") else { return nil }
         let pinyin = line[line.index(after: open)..<close]
         let definitions = line[slash...].split(separator: "/").map(String.init).filter { !$0.isEmpty }
         return DictEntry(

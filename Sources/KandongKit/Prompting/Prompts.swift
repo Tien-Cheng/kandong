@@ -152,8 +152,9 @@ public enum Prompts {
             }
             parts.append("My Terms (always translate these this way):\n" + lines.joined(separator: "\n"))
         }
-        let known = Set(terms.map(\.chinese))
-        let entries = glossary.filter { !$0.addOnGlosses.isEmpty && !known.contains($0.text) }.prefix(20)
+        // Terms win; they may be written in Traditional characters.
+        let known = Set(terms.flatMap { [$0.chinese, $0.chinese.applyingTransform(StringTransform("Hant-Hans"), reverse: false) ?? $0.chinese] })
+        let entries = glossary.filter { !$0.addOnGlosses.isEmpty && !known.contains($0.text) && !known.contains($0.original) }.prefix(20)
         if !entries.isEmpty {
             let lines = entries.map { "- \($0.text) → " + $0.addOnGlosses.prefix(3).map(\.text).joined(separator: "; ") }
             parts.append("Glossary (specialist meanings; use them where they fit):\n" + lines.joined(separator: "\n"))
@@ -166,7 +167,7 @@ public enum Prompts {
     public static func learn(
         text: String, analysis: OfflineAnalysis, context: String, terms: [Term], askForReadings: Bool = true, preceding: String? = nil
     ) -> AIRequest {
-        var user = steering(context: context, terms: terms, glossary: analysis.uniqueWords.filter { text.contains($0.text) })
+        var user = steering(context: context, terms: terms, glossary: analysis.uniqueWords.filter { text.contains($0.original) || text.contains($0.text) })
         if !user.isEmpty { user += "\n\n" }
         user += precedingNote(preceding) + "Text:\n\(text)"
         guard askForReadings else {
