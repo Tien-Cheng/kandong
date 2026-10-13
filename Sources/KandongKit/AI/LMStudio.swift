@@ -7,12 +7,14 @@ public struct LMStudioModel: Hashable, Sendable, Identifiable {
     public let type: String
     /// "loaded" or "not-loaded".
     public let state: String
-    /// The thinking levels it offers, least first, e.g. ["off", "on"]; empty when it doesn't think.
-    public var reasoningOptions: [String] = []
+    /// The thinking levels it offers, least first, e.g. ["off", "on"]; empty when it doesn't think,
+    /// nil when LM Studio doesn't say (before 0.4).
+    public var reasoningOptions: [String]?
 
     public var canReadImages: Bool { type == "vlm" }
     public var isLoaded: Bool { state == "loaded" }
-    public var canThink: Bool { !reasoningOptions.isEmpty }
+    /// nil when unknown.
+    public var canThink: Bool? { reasoningOptions.map { !$0.isEmpty } }
 }
 
 /// How far an LM Studio download has got.
@@ -83,11 +85,13 @@ public enum LMStudio {
 
     public static func download(_ job: String, baseURL: String) async throws -> LMStudioDownload {
         let json = try await get("/api/v1/models/download/status/\(job)", baseURL: baseURL)
-        let state: LMStudioDownload.State = switch json["status"]?.string {
-        case "completed": .completed
-        case "paused": .paused
-        case "failed": .failed(json["error"]?.string ?? json["error"]?["message"]?.string ?? "The download failed.")
-        default: .downloading
+        let state: LMStudioDownload.State
+        switch json["status"]?.string {
+        case "completed": state = .completed
+        case "paused": state = .paused
+        case "downloading", "queued", "pending": state = .downloading
+        case "failed": state = .failed(json["error"]?.string ?? json["error"]?["message"]?.string ?? "The download failed.")
+        case let other: throw BackendError.badResponse("LM Studio reported the download as \(other ?? "nothing")")
         }
         return LMStudioDownload(
             state: state,
@@ -149,9 +153,13 @@ public enum LMStudio {
         }
         let status = (response as? HTTPURLResponse)?.statusCode ?? 200
         let json = try? JSONValue.decode(data)
+        let message = json?["error"]?["message"]?.string ?? json?["error"]?.string
         guard (200..<300).contains(status) else {
-            let message = json?["error"]?["message"]?.string ?? json?["error"]?.string
             throw BackendError.http(status: status, body: message ?? String(decoding: data, as: UTF8.self))
+        }
+        // Older LM Studio answers an unknown endpoint with 200 and an error.
+        if let message {
+            throw BackendError.http(status: message.lowercased().contains("unexpected endpoint") ? 404 : 500, body: message)
         }
         guard let json else { throw BackendError.badResponse("LM Studio sent something that isn't JSON") }
         return json

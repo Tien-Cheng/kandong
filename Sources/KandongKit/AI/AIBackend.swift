@@ -140,6 +140,8 @@ public enum BackendError: LocalizedError, Equatable {
     case timedOut(name: String, seconds: Int)
     /// The model got stuck saying the same thing over and over.
     case repeating(name: String)
+    /// The reply reached its length limit (or the model's context) before it was finished.
+    case cutOff(name: String)
 
     public var errorDescription: String? {
         switch self {
@@ -171,6 +173,8 @@ public enum BackendError: LocalizedError, Equatable {
             "\(name) didn't finish within \(seconds) seconds. If it thinks before answering, turn thinking down in the AI tab, or try a smaller model."
         case .repeating(let name):
             "\(name) got stuck repeating itself. Try again, or pick another model in the AI tab."
+        case .cutOff(let name):
+            "\(name) stopped before finishing: the reply ran far longer than expected or filled the model's context. Try again, or try a shorter text."
         }
     }
 }

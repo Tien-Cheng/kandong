@@ -166,7 +166,7 @@ private struct SessionView: View {
                 } else {
                     SectionTitle("Explanation")
                 }
-                MarkdownText(markdown: Prompts.visibleText(session.explanation))
+                MarkdownText(markdown: Prompts.unfenced(Prompts.visibleText(session.explanation)))
                 if session.isExplanationThinking {
                     ProgressRow(text: "Thinking before it answers…")
                 } else if session.isExplaining {

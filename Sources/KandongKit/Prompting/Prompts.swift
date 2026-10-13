@@ -223,19 +223,20 @@ public enum Prompts {
                 text.removeSubrange(open.lowerBound..<text.endIndex)
             }
         }
-        return unfenced(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// The reply without the ```markdown fence models sometimes wrap Markdown in, which would show
-    /// as code. A part of a long Explanation can bring its own, so they go wherever they are; the
-    /// closing fence may not have arrived yet while the reply streams in.
-    static func unfenced(_ text: String) -> String {
+    /// An Explanation without the ```markdown fence models sometimes wrap it in, which would show it
+    /// as code. Only a fence opening the Explanation, or one of its parts, is a wrapper; code blocks
+    /// within it stay. The closing fence may not have arrived yet while the reply streams in.
+    public static func unfenced(_ text: String) -> String {
         var lines: [Substring] = []
         var wrapped = false
-        for (index, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
             let trimmed = line.trimmingCharacters(in: .whitespaces).lowercased()
-            // A bare fence opening the whole reply wraps it too.
-            if !wrapped, trimmed == "```markdown" || trimmed == "```md" || (index == 0 && trimmed == "```") {
+            let previous = lines.last { !$0.trimmingCharacters(in: .whitespaces).isEmpty }?.trimmingCharacters(in: .whitespaces)
+            let opensPart = previous == nil || previous == "---" || previous?.hasPrefix("**Part ") == true
+            if !wrapped, opensPart, ["```", "```markdown", "```md"].contains(trimmed) {
                 wrapped = true
             } else if wrapped, trimmed == "```" {
                 wrapped = false

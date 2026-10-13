@@ -38,6 +38,18 @@ import Testing
         | 老师 | lǎoshī | teacher |
         """
         #expect(!detector.isRepeating(explanation))
+        let table = "| " + (1...64).map { "Column \($0)" }.joined(separator: " | ") + " |\n|" + String(repeating: " --- |", count: 64)
+        #expect(!detector.isRepeating(table), "a table's separator row isn't a loop")
+        let laughter = String(repeating: "哈", count: 260)
+        #expect(!detector.isRepeating(laughter, source: "他笑了：" + laughter), "copying the source's own repeats isn't a loop")
+    }
+
+    @Test func dropsOnlyTheParameterTheServerNamed() {
+        #expect(OpenAICompatibleBackend.namesParameter(#"{"error":{"message":"Unrecognized request argument supplied: reasoning_effort"}}"#, "reasoning_effort"))
+        #expect(!OpenAICompatibleBackend.namesParameter(
+            #"{"error":{"param":"response_format","message":"response_format is not supported by this reasoning model"}}"#, "reasoning_effort"))
+        #expect(!OpenAICompatibleBackend.namesParameter("response_format is not supported by this reasoning model", "reasoning_effort"))
+        #expect(OpenAICompatibleBackend.namesParameter("Invalid reasoning effort", "reasoning_effort"))
     }
 
     @Test func storedSettingsGainPerTaskThinking() throws {
@@ -182,6 +194,53 @@ import Testing
         }
     }
 
+    @Test func leavesThinkingAloneWhenLMStudioDoesNotSay() async throws {
+        let (server, base) = try await FakeLMStudio.start(["--v0-only"])
+        defer { server.terminate() }
+        let models = try await LMStudio.models(baseURL: base)
+        #expect(models.first?.canThink == nil)
+        _ = try await Self.backend(base).complete(AIRequest(system: "readingCorrections", user: "今天"))
+        let log = try await FakeLMStudio.log(base)
+        #expect(log[0]["reasoning_effort"]?.string == "none", "the setting is still sent")
+        #expect(log[0]["max_tokens"]?.isNull ?? true, "but no cap, since the model may think anyway")
+    }
+
+    @Test func readsErrorsSentWithStatus200() async throws {
+        let (server, base) = try await FakeLMStudio.start(["--old-200"])
+        defer { server.terminate() }
+        #expect(try await LMStudio.models(baseURL: base).map(\.id) == ["fake-vlm"])
+        await #expect(throws: BackendError.http(status: 404, body: "Unexpected endpoint or method.")) {
+            _ = try await LMStudio.startDownload("google/gemma-4-e4b", baseURL: base)
+        }
+        await #expect(throws: BackendError.self) { try await LMStudio.load("google/gemma-4-e4b", baseURL: base) }
+    }
+
+    @Test func reportsAVanishedDownload() async throws {
+        let (server, base) = try await FakeLMStudio.start()
+        defer { server.terminate() }
+        await #expect(throws: BackendError.http(status: 404, body: "No download job job_gone")) {
+            _ = try await LMStudio.download("job_gone", baseURL: base)
+        }
+    }
+
+    @Test func saysWhenAReplyIsCutOff() async throws {
+        let (server, base) = try await FakeLMStudio.start()
+        defer { server.terminate() }
+        await #expect(throws: BackendError.cutOff(name: "LM Studio · fake-vlm")) {
+            _ = try await Self.backend(base).complete(AIRequest(system: "LENGTH", user: "x"))
+        }
+    }
+
+    @Test func givesUpOnAReplyThatNeverEnds() async throws {
+        let (server, base) = try await FakeLMStudio.start()
+        defer { server.terminate() }
+        let started = Date()
+        await #expect(throws: BackendError.timedOut(name: "LM Studio", seconds: 1)) {
+            _ = try await Self.backend(base, timeLimit: 1).complete(AIRequest(system: "TRICKLE", user: "x"))
+        }
+        #expect(Date().timeIntervalSince(started) < 4)
+    }
+
     @Test func deepLinksToLMStudio() {
         #expect(LMStudio.deepLink(huggingFaceRepo: "lmstudio-community/gemma-4-E4B-it-MLX-4bit")?.absoluteString
                 == "lmstudio://open_from_hf?model=lmstudio-community/gemma-4-E4B-it-MLX-4bit")
@@ -194,14 +253,21 @@ private actor Flag {
 }
 
 @Suite struct FencedReplyTests {
-    @Test func dropsAMarkdownFenceAroundTheReply() {
-        #expect(Prompts.visibleText("```markdown\n**Structure**: A + B\n```") == "**Structure**: A + B")
-        #expect(Prompts.visibleText("```markdown\n**Structure**: A + B\n- still coming") == "**Structure**: A + B\n- still coming")
-        #expect(Prompts.visibleText("```\n**Structure**\n```") == "**Structure**")
-        #expect(Prompts.visibleText("**Part 1 of 2**\n\n```markdown\n- one\n```\n\n---\n\n**Part 2 of 2**\n\n```markdown\n- two")
+    @Test func dropsAMarkdownFenceAroundAnExplanation() {
+        #expect(Prompts.unfenced("```markdown\n**Structure**: A + B\n```") == "**Structure**: A + B")
+        #expect(Prompts.unfenced("```markdown\n**Structure**: A + B\n- still coming") == "**Structure**: A + B\n- still coming")
+        #expect(Prompts.unfenced("```\n**Structure**\n```") == "**Structure**")
+        #expect(Prompts.unfenced("**Part 1 of 2**\n\n```markdown\n- one\n```\n\n---\n\n**Part 2 of 2**\n\n```markdown\n- two")
                 == "**Part 1 of 2**\n\n- one\n\n---\n\n**Part 2 of 2**\n\n- two")
+    }
+
+    @Test func keepsCodeBlocksAndTranscriptions() {
         let withCode = "Use it like this:\n```swift\nprint(1)\n```"
-        #expect(Prompts.visibleText(withCode) == withCode, "other code blocks stay")
+        #expect(Prompts.unfenced(withCode) == withCode)
+        let example = "**Words**: a heading looks like this:\n```markdown\n# 标题\n```"
+        #expect(Prompts.unfenced(example) == example, "a Markdown example inside the Explanation stays")
+        let transcription = "```markdown\n# 标题\n```"
+        #expect(Prompts.visibleText(transcription) == transcription, "reading an image keeps every line")
         #expect(try! Prompts.parseReverse("```json\n{\"chinese\": \"你好\", \"note\": \"\"}\n```").chinese == "你好")
     }
 }

@@ -18,6 +18,7 @@ final class AppModel {
             if normalized != settings { settings = normalized }
             saveSettings()
             applySettings(previous: oldValue)
+            stopStaleDownloads(previous: oldValue)
         }
     }
 
@@ -37,6 +38,7 @@ final class AppModel {
     @ObservationIgnored private var catalogLoaded = false
     /// A recommended model being downloaded into an LM Studio Backend, by Backend id.
     private(set) var modelDownloads: [String: ModelDownload] = [:]
+    @ObservationIgnored private var downloadTasks: [String: Task<Void, Never>] = [:]
 
     @ObservationIgnored private var analyzerTask: Task<OfflineAnalyzer?, Never>?
     @ObservationIgnored private var hotkeys: HotkeyCenter!
@@ -149,16 +151,18 @@ final class AppModel {
 
     /// Downloads a recommended model into an LM Studio Backend, loads it, and makes it the Backend's model.
     func download(_ recommended: RecommendedModel, into configID: String) {
-        guard modelDownloads[configID]?.isActive != true, let baseURL = settings.backend(id: configID)?.openAI?.baseURL else { return }
+        guard modelDownloads[configID]?.isActive != true, let config = settings.backend(id: configID),
+              let baseURL = config.openAI?.baseURL else { return }
+        let modelBefore = config.openAI?.model ?? ""
         modelDownloads[configID] = .downloading(model: recommended.id, fraction: 0, detail: "Starting…")
-        Task {
+        downloadTasks[configID] = Task {
             do {
                 let job: String?
                 do {
                     job = try await LMStudio.startDownload(recommended.id, baseURL: baseURL)
                 } catch BackendError.http(let status, _) where status == 404 {
                     // LM Studio before 0.4 can't download through its API; show the model in LM Studio instead.
-                    modelDownloads[configID] = nil
+                    finishDownload(configID, nil)
                     if let url = LMStudio.deepLink(huggingFaceRepo: recommended.huggingFace) { NSWorkspace.shared.open(url) }
                     return
                 }
@@ -179,17 +183,40 @@ final class AppModel {
                 }
                 modelDownloads[configID] = .loading(model: recommended.id)
                 try await LMStudio.load(recommended.id, baseURL: baseURL)
-                if let index = settings.backends.firstIndex(where: { $0.id == configID }) {
+                try Task.checkCancellation()
+                // Only if the Backend still talks to that server and no other model was picked meanwhile.
+                if let index = settings.backends.firstIndex(where: { $0.id == configID }),
+                   settings.backends[index].openAI?.baseURL == baseURL, (settings.backends[index].openAI?.model ?? "") == modelBefore {
                     settings.backends[index].openAI?.model = recommended.id
                 }
-                modelDownloads[configID] = nil
+                finishDownload(configID, nil)
             } catch {
+                // Stopped by `stopWatchingDownload`, which has already cleared it.
+                guard !Task.isCancelled else { return }
                 let message = LMStudio.isOutOfMemory(error)
                     ? "This Mac doesn't have enough free memory to load \(recommended.name). Quit some apps, or unload other models in LM Studio, then try again."
                     : error.localizedDescription
-                modelDownloads[configID] = .failed(model: recommended.id, message: message)
+                finishDownload(configID, .failed(model: recommended.id, message: message))
             }
             await refreshStatuses(only: configID)
+        }
+    }
+
+    private func finishDownload(_ configID: String, _ state: ModelDownload?) {
+        modelDownloads[configID] = state
+        downloadTasks[configID] = nil
+    }
+
+    /// Stops following a download; LM Studio carries on with it unless it's stopped there.
+    func stopWatchingDownload(for configID: String) {
+        downloadTasks[configID]?.cancel()
+        finishDownload(configID, nil)
+    }
+
+    /// A download is for one server: stop following it when its Backend goes or points elsewhere.
+    private func stopStaleDownloads(previous: AppSettings) {
+        for id in downloadTasks.keys where settings.backend(id: id)?.openAI?.baseURL != previous.backend(id: id)?.openAI?.baseURL {
+            stopWatchingDownload(for: id)
         }
     }
 
@@ -232,7 +259,6 @@ final class AppModel {
         statuses[config.id] = nil
     }
 
-    /// Does what a Backend's status suggests to make it ready.
     /// A fix's button title, e.g. "Get LM Studio" when the app it would open isn't installed.
     func title(for fix: FixAction) -> String {
         if case .openApp(let bundleID, _) = fix, bundleID == LMStudio.bundleID,
@@ -242,6 +268,7 @@ final class AppModel {
         return fix.label
     }
 
+    /// Does what a Backend's status suggests to make it ready.
     func perform(_ fix: FixAction) {
         switch fix {
         case .openURL(let url, _):

@@ -294,6 +294,9 @@ private struct OpenAIFields: View {
         }
         ThinkingPicker(title: "Thinking when translating", level: $config.reasoning.translate, options: thinkingOptions)
         ThinkingPicker(title: "Thinking when explaining", level: $config.reasoning.explain, options: thinkingOptions)
+        if let thinkingNote {
+            Text(thinkingNote).font(.caption).foregroundStyle(.secondary)
+        }
         Picker("Reads images", selection: settings.vision) {
             Text(config.isLMStudio ? "Detect (vision models)" : "Auto (no)").tag(VisionSupport.auto)
             Text("Yes").tag(VisionSupport.yes)
@@ -311,8 +314,16 @@ private struct OpenAIFields: View {
     private var thinkingOptions: [String]? {
         guard config.isLMStudio else { return [""] + Reasoning.openAILevels }
         let chosen = settings.wrappedValue.model.isEmpty ? lmModels.first : lmModels.first { $0.id == settings.wrappedValue.model }
-        guard let chosen else { return Reasoning.levels.filter { $0 != "on" } }
-        return chosen.canThink ? chosen.reasoningOptions : nil
+        // Unknown (server down, or LM Studio before 0.4 doesn't say): offer every level.
+        guard let chosen, let allowed = chosen.reasoningOptions else { return Reasoning.levels.filter { $0 != "on" } }
+        return allowed.isEmpty ? nil : allowed
+    }
+
+    /// Says why the menu is short when the model can only switch thinking on or off.
+    private var thinkingNote: String? {
+        guard let options = thinkingOptions, Set(options) == ["off", "on"] else { return nil }
+        let chosen = settings.wrappedValue.model.isEmpty ? lmModels.first?.id : settings.wrappedValue.model
+        return "\(chosen ?? "This model") can only turn thinking on or off; it has no levels in between. Thinking makes it much slower."
     }
 
     private func refresh() async {
@@ -362,10 +373,16 @@ private struct RecommendedModelRow: View {
     var body: some View {
         let catalog = model.modelCatalog
         let memoryGB = Int((Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824).rounded())
+        let wanted = catalog.recommendation(memoryBytes: ProcessInfo.processInfo.physicalMemory, freeDiskBytes: nil)
         LabeledContent {
-            if let recommended = catalog.recommendationForThisMac() {
+            // A download under way, or a model already here, needs no more disk.
+            if let active = model.modelDownloads[config.id]?.modelID, let entry = catalog.models.first(where: { $0.id == active }) {
+                content(for: entry)
+            } else if let wanted, downloaded.contains(wanted.id) || inUse == wanted.id {
+                content(for: wanted)
+            } else if let recommended = catalog.recommendationForThisMac() {
                 content(for: recommended)
-            } else if let wanted = catalog.recommendation(memoryBytes: ProcessInfo.processInfo.physicalMemory, freeDiskBytes: nil) {
+            } else if let wanted {
                 Text("Free up about \(Int(wanted.downloadGB.rounded(.up)) + 2) GB of disk to download \(wanted.name).")
                     .foregroundStyle(.secondary)
             } else {
@@ -405,7 +422,10 @@ private struct RecommendedModelRow: View {
     }
 
     @ViewBuilder private func action(for recommended: RecommendedModel) -> some View {
-        if model.modelDownloads[config.id]?.isActive == true {
+        if case .downloading? = model.modelDownloads[config.id] {
+            Button("Stop Watching") { model.stopWatchingDownload(for: config.id) }
+                .help("Kandong stops following it; LM Studio carries on unless you stop it there.")
+        } else if model.modelDownloads[config.id]?.isActive == true {
             EmptyView()
         } else if inUse == recommended.id {
             Label("In use", systemImage: "checkmark.circle.fill").foregroundStyle(.green).labelStyle(.titleAndIcon)

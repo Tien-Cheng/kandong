@@ -382,7 +382,7 @@ extension OpenAICompatibleTests {
         let models = try await LMStudio.models(baseURL: base)
         #expect(models.map(\.id) == ["fake-vlm", "fake-plain"], "embedding models are hidden, loaded ones come first")
         #expect(models[0].reasoningOptions == ["off", "on"] && models[0].canReadImages)
-        #expect(!models[1].canThink && !models[1].canReadImages)
+        #expect(models[1].canThink == false && !models[1].canReadImages)
         let backend = OpenAICompatibleBackend(config: Self.config(.lmStudio, base))
         #expect(await backend.supportsImages())
         #expect(await !OpenAICompatibleBackend(config: Self.config(.lmStudio, base, vision: .no)).supportsImages())

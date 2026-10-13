@@ -72,16 +72,26 @@ public struct RepetitionDetector: Sendable {
 
     public init() {}
 
-    public func isRepeating(_ text: String) -> Bool {
+    /// Whether `text` ends in a loop. Repeats without words (a Markdown table's `| --- |` row,
+    /// rules, spaces) don't count, nor does a repeat already in the `source` being translated.
+    public func isRepeating(_ text: String, source: String = "") -> Bool {
+        guard let unit = repeatingUnit(text), unit.contains(where: \.isLetter) else { return false }
+        return !source.contains(String(repeating: unit, count: 3))
+    }
+
+    /// The stretch `text` ends by repeating, if it does.
+    func repeatingUnit(_ text: String) -> String? {
         let tail = Array(text.suffix(max(minimumSpan, longestPeriod * 3)))
-        guard tail.count >= minimumSpan else { return false }
+        guard tail.count >= minimumSpan else { return nil }
         for period in 1...longestPeriod {
             // A stretch must come round at least three times, and fill the span.
             let span = max(minimumSpan, period * 3)
             guard span <= tail.count else { break }
             let start = tail.count - span
-            if (start + period..<tail.count).allSatisfy({ tail[$0] == tail[$0 - period] }) { return true }
+            if (start + period..<tail.count).allSatisfy({ tail[$0] == tail[$0 - period] }) {
+                return String(tail[(tail.count - period)...])
+            }
         }
-        return false
+        return nil
     }
 }

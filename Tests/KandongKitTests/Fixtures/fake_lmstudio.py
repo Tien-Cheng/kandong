@@ -1,9 +1,11 @@
 """A stand-in for LM Studio's local server: its model lists, downloads, and streaming chat completions.
 
-Usage: python3 fake_lmstudio.py PORT [--reject-schema] [--reject-reasoning] [--v0-only] [--no-memory]
+Usage: python3 fake_lmstudio.py PORT [--reject-schema] [--reject-reasoning] [--v0-only] [--old-200] [--no-memory]
+--old-200 answers unknown endpoints with 200 and an error, as LM Studio before 0.4 does.
 Replies are canned by request type (learn / reverse / explain / transcribe) so tests can assert on them.
 A system prompt containing LOOP gets a reply that repeats forever, THINK one that thinks first, and
-SLOW one that only starts after 5 seconds.
+SLOW one that only starts after 5 seconds, TRICKLE one that never ends, and LENGTH one cut off at its
+length limit.
 """
 import json, sys, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -11,7 +13,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PORT = int(sys.argv[1])
 REJECT_SCHEMA = "--reject-schema" in sys.argv
 REJECT_REASONING = "--reject-reasoning" in sys.argv
-V0_ONLY = "--v0-only" in sys.argv
+V0_ONLY = "--v0-only" in sys.argv or "--old-200" in sys.argv
+OLD_200 = "--old-200" in sys.argv
 NO_MEMORY = "--no-memory" in sys.argv
 LOG = []
 JOBS = {}
@@ -19,6 +22,9 @@ JOBS = {}
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
+
+    def unknown(self):
+        self.send_json(200 if OLD_200 else 404, {"error": "Unexpected endpoint or method."})
 
     def send_json(self, status, obj):
         body = json.dumps(obj).encode()
@@ -41,8 +47,10 @@ class Handler(BaseHTTPRequestHandler):
                 {"type": "llm", "key": "fake-plain", "loaded_instances": [], "capabilities": {"vision": False}},
                 {"type": "embedding", "key": "fake-embed", "loaded_instances": [], "capabilities": None},
             ]})
-        elif self.path.startswith("/api/v1/models/download/status/"):
+        elif self.path.startswith("/api/v1/models/download/status/") and not V0_ONLY:
             job = self.path.rsplit("/", 1)[1]
+            if job not in JOBS:
+                return self.send_json(404, {"error": {"type": "job_not_found", "message": "No download job " + job}})
             JOBS[job] += 1
             done = JOBS[job] >= 3
             self.send_json(200, {"job_id": job, "status": "completed" if done else "downloading",
@@ -53,18 +61,20 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/log":
             self.send_json(200, LOG)
         else:
-            self.send_json(404, {"error": "Unexpected endpoint or method."})
+            self.unknown()
 
     def do_POST(self):
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if self.path == "/api/v1/models/download":
             if V0_ONLY:
-                return self.send_json(404, {"error": "Unexpected endpoint or method."})
+                return self.unknown()
             if request["model"] == "fake-vlm":
                 return self.send_json(200, {"status": "already_downloaded"})
             JOBS["job_1"] = 0
             return self.send_json(200, {"job_id": "job_1", "status": "downloading", "total_size_bytes": 6_000_000_000})
         if self.path == "/api/v1/models/load":
+            if V0_ONLY:
+                return self.unknown()
             if NO_MEMORY:
                 return self.send_json(500, {"error": {"message": "Model loading was stopped due to insufficient system resources."}})
             return self.send_json(200, {"type": "llm", "instance_id": request["model"], "status": "loaded"})
@@ -80,9 +90,22 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(400, {"error": {"message": "Unrecognized request argument supplied: reasoning_effort"}})
         if "SLOW" in system:
             time.sleep(5)
+        if "TRICKLE" in system:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            try:
+                for i in range(100):
+                    self.send_chunk({"content": f"word{i} "})
+                    time.sleep(0.2)
+            except BrokenPipeError:
+                pass
+            return
         thinking = ""
         if "LOOP" in system:
             reply = "我们一起去吧，" * 500
+        elif "LENGTH" in system:
+            reply = '{"translation": "Tomorrow is the'
         elif "THINK" in system:
             thinking, reply = "Let me think about this. " * 3, "Hello, world"
         elif "Transcribe" in system:
@@ -101,6 +124,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_chunk({"reasoning_content": thinking[i:i + 7]})
             for i in range(0, len(reply), 7):
                 self.send_chunk({"content": reply[i:i + 7]})
+            if "LENGTH" in system:
+                self.wfile.write(f"data: {json.dumps({'choices': [{'delta': {}, 'finish_reason': 'length'}]})}\n\n".encode())
             self.wfile.write(b"data: [DONE]\n\n")
         except BrokenPipeError:
             pass

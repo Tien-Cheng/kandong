@@ -5,6 +5,12 @@ enum ModelDownload: Equatable {
     case loading(model: String)
     case failed(model: String, message: String)
 
+    var modelID: String {
+        switch self {
+        case .downloading(let model, _, _), .loading(let model), .failed(let model, _): model
+        }
+    }
+
     var isActive: Bool {
         if case .failed = self { return false }
         return true

@@ -153,9 +153,11 @@ public struct OpenAICompatibleBackend: AIBackend {
     func options(for request: AIRequest, model: String, lmStudioModels: [LMStudioModel]?) -> Options {
         let wanted = config.reasoning[request.task]
         var options = Options(useSchema: request.schema != nil, effort: Reasoning.effort(wanted), thinks: wanted == "off" ? false : nil)
+        // LM Studio before 0.4 doesn't say whether a model thinks; then nothing is assumed either way.
         if let info = lmStudioModels?.first(where: { $0.id == model }) {
-            guard info.canThink else { return Options(useSchema: options.useSchema, effort: nil, thinks: false) }
-            let level = Reasoning.resolve(wanted, allowed: info.reasoningOptions)
+            guard let allowed = info.reasoningOptions else { return Options(useSchema: options.useSchema, effort: options.effort, thinks: nil) }
+            guard !allowed.isEmpty else { return Options(useSchema: options.useSchema, effort: nil, thinks: false) }
+            let level = Reasoning.resolve(wanted, allowed: allowed)
             options.effort = Reasoning.effort(level)
             options.thinks = level != "off"
         }
@@ -168,8 +170,8 @@ public struct OpenAICompatibleBackend: AIBackend {
         var options = options(for: request, model: model, lmStudioModels: lmStudioModels)
         while true {
             guard case .rejected(let status, let body) = try await stream(request, model: model, options: options, continuation: continuation) else { return }
-            // Some servers reject `reasoning_effort` or `response_format`; retry without what they named.
-            if options.effort != nil, body.lowercased().contains("reasoning") {
+            // Some servers reject `reasoning_effort` or `response_format`; retry without the one they named.
+            if options.effort != nil, Self.namesParameter(body, "reasoning_effort") {
                 options.effort = nil
                 options.thinks = options.thinks == false ? nil : options.thinks
             } else if options.useSchema {
@@ -181,6 +183,13 @@ public struct OpenAICompatibleBackend: AIBackend {
     }
 
     private enum Outcome { case done, rejected(status: Int, body: String) }
+
+    /// Whether an error names a request parameter, in its `param` field or its message.
+    static func namesParameter(_ body: String, _ parameter: String) -> Bool {
+        if let json = try? JSONValue.decode(Data(body.utf8)), let param = json["error"]?["param"]?.string { return param == parameter }
+        let text = body.lowercased()
+        return text.contains(parameter) || text.contains(parameter.replacingOccurrences(of: "_", with: " "))
+    }
 
     /// Servers word this differently: OpenAI "maximum context length" / context_length_exceeded,
     /// llama.cpp "exceeds the available context size", LM Studio "context length of only N tokens".
@@ -264,19 +273,20 @@ public struct OpenAICompatibleBackend: AIBackend {
             if let reasoning = delta?["reasoning_content"]?.string ?? delta?["reasoning"]?.string, !reasoning.isEmpty {
                 if !thought { thought = true; await request.onThinking?() }
                 thinking = String((thinking + reasoning).suffix(1000))
-                if detector.isRepeating(thinking) { throw BackendError.repeating(name: who) }
+                if detector.isRepeating(thinking, source: request.user) { throw BackendError.repeating(name: who) }
             }
             if let content = delta?["content"]?.string, !content.isEmpty {
                 continuation.yield(content)
                 reply += content
                 replyLength += content.count
-                if replyLength - checked >= 64 {
+                // Reading an image copies whatever it shows, repeats and all; the time limit still applies.
+                if request.image == nil, replyLength - checked >= 64 {
                     checked = replyLength
-                    if detector.isRepeating(reply) { throw BackendError.repeating(name: who) }
+                    if detector.isRepeating(reply, source: request.user) { throw BackendError.repeating(name: who) }
                 }
             }
-            if choice?["finish_reason"]?.string == "length", options.maxTokens(for: request) != nil {
-                throw BackendError.repeating(name: who)
+            if choice?["finish_reason"]?.string == "length" {
+                throw BackendError.cutOff(name: who)
             }
         }
         return .done
