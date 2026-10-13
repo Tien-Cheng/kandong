@@ -32,6 +32,8 @@ final class ResultPanelController: NSObject, NSWindowDelegate {
     @ObservationIgnored private var fixedEdge: NSRectEdge = .maxY
     /// Set when the user drags the panel's height; it then keeps that height until the next Lookup.
     @ObservationIgnored private var userSizedHeight = false
+    /// The height the content last asked for, applied once the current layout pass is over.
+    @ObservationIgnored private var pendingHeight: CGFloat?
 
     static let cornerRadius: CGFloat = 16
 
@@ -65,7 +67,11 @@ final class ResultPanelController: NSObject, NSWindowDelegate {
         let glass = NSGlassEffectView()
         glass.style = .regular
         glass.cornerRadius = Self.cornerRadius
-        glass.contentView = NSHostingView(rootView: ResultView(model: model, controller: self))
+        let host = NSHostingView(rootView: ResultView(model: model, controller: self))
+        // The controller sizes the panel (see `fit`); the hosting view mustn't also push its own size
+        // into the window's constraints, or the two fight and AppKit gives up mid-layout.
+        host.sizingOptions = []
+        glass.contentView = host
         panel.contentView = glass
     }
 
@@ -131,13 +137,26 @@ final class ResultPanelController: NSObject, NSWindowDelegate {
 
     /// Grows or shrinks the panel to show `contentHeight` of scrolling content, of which
     /// `viewportHeight` is visible now; at most 70% of the screen, and never past its edge.
+    ///
+    /// Called from SwiftUI layout, so the resize waits for the current pass to finish: resizing the
+    /// window inside a layout pass (e.g. when a flip swaps the content of a visible panel) makes
+    /// AppKit lay out again and again until it throws.
     func fit(contentHeight: CGFloat, viewportHeight: CGFloat) {
-        guard panel.isVisible, !userSizedHeight, !panel.inLiveResize, viewportHeight > 0 else { return }
+        guard panel.isVisible, viewportHeight > 0 else { return }
+        let alreadyScheduled = pendingHeight != nil
+        pendingHeight = panel.frame.height - viewportHeight + contentHeight
+        guard !alreadyScheduled else { return }
+        DispatchQueue.main.async { [weak self] in self?.applyPendingHeight() }
+    }
+
+    private func applyPendingHeight() {
+        guard let wanted = pendingHeight else { return }
+        pendingHeight = nil
+        guard panel.isVisible, !userSizedHeight, !panel.inLiveResize else { return }
         let visible = (panel.screen ?? NSScreen.main)?.visibleFrame ?? panel.frame
         var frame = panel.frame
-        let chrome = frame.height - viewportHeight
         let room = fixedEdge == .maxY ? frame.maxY - visible.minY - 8 : visible.maxY - frame.minY - 8
-        let height = min(max(chrome + contentHeight, panel.minSize.height), visible.height * 0.7, room).rounded()
+        let height = min(max(wanted, panel.minSize.height), visible.height * 0.7, room).rounded()
         guard abs(height - frame.height) > 1 else { return }
         if fixedEdge == .maxY { frame.origin.y = frame.maxY - height }
         frame.size.height = height

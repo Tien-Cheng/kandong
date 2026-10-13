@@ -11,9 +11,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var mainWindow: NSWindow?
     private let windowState = MainWindowState()
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
+    // The model exists before launch finishes: a kandong:// link that launched the app arrives
+    // between will- and didFinishLaunching.
+    func applicationWillFinishLaunching(_ notification: Notification) {
         Self.shared = self
         model = AppModel()
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
         setUpStatusItem()
         if !Permissions.accessibilityGranted {
             Permissions.requestAccessibility()
