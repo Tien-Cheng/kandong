@@ -23,6 +23,10 @@ Or download `Kandong-<version>.zip` from [Releases](https://github.com/Tien-Chen
 
 Kandong isn't notarized by Apple (that needs a paid developer account), so macOS blocks the first launch: open it once, then go to **System Settings → Privacy & Security** and click **Open Anyway**. Then grant **Accessibility** (to read selected text and the tap key). **Screen Recording** is needed for region capture. Releases are all signed with the same certificate, so these permissions carry over when you update.
 
+### Updates
+
+From 0.4.0, Kandong updates itself. It checks GitHub for a new version once a day, downloads it in the background and installs it when Kandong quits; **Restart to Update** in the menu bar installs it straight away, and **Check for Updates…** checks now. Both can be turned off in **Settings → Updates**. Nothing about your Mac is sent. Updates don't need **Open Anyway** again. Homebrew installs update the same way (the cask is marked `auto_updates`).
+
 ## Build from source
 
 Needs the Xcode Command Line Tools (full Xcode isn't required).

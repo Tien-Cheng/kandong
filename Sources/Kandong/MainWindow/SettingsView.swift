@@ -12,6 +12,9 @@ struct SettingsView: View {
             dictionariesSection
             PermissionsSection()
             historySection
+            if let updater = AppDelegate.shared?.updater {
+                UpdatesSection(updater: updater)
+            }
         }
         .formStyle(.grouped)
     }
@@ -251,6 +254,26 @@ private struct ShortcutRecorder: View {
         if recording {
             recording = false
             model.suspendHotkeys(false)
+        }
+    }
+}
+
+/// Sparkle's settings, kept in Kandong's user defaults by Sparkle itself.
+private struct UpdatesSection: View {
+    @Bindable var updater: Updater
+
+    var body: some View {
+        Section {
+            Toggle("Check for updates automatically", isOn: $updater.automaticallyChecks)
+            Toggle("Download and install updates automatically", isOn: $updater.automaticallyDownloads)
+                .disabled(!updater.automaticallyChecks)
+            LabeledContent("Version \(updater.currentVersion)") {
+                Button("Check Now") { updater.checkForUpdates() }
+            }
+        } header: {
+            Text("Updates")
+        } footer: {
+            Text("Kandong checks GitHub for a new version once a day and sends nothing about your Mac. A downloaded update installs when Kandong quits, or straight away from Restart to Update in the menu bar.")
         }
     }
 }

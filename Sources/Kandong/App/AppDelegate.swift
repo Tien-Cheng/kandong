@@ -10,6 +10,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var mainWindow: NSWindow?
     private let windowState = MainWindowState()
+    /// Sparkle, once launched (nil when running from `swift run`).
+    private(set) var updater: Updater?
 
     // The model exists before launch finishes: a kandong:// link that launched the app arrives
     // between will- and didFinishLaunching.
@@ -20,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setUpStatusItem()
+        if Updater.isAvailable { updater = Updater() }
         if !Permissions.accessibilityGranted {
             Permissions.requestAccessibility()
             showMainWindow(tab: .settings)
@@ -42,7 +45,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// `kandong://lookup?text=…[&local=1]`, `kandong://clipboard`, `kandong://selection`,
-    /// `kandong://capture`, `kandong://ai[?backend=<id>]`, `kandong://settings` — for Raycast,
+    /// `kandong://capture`, `kandong://ai[?backend=<id>]`, `kandong://settings`,
+    /// `kandong://check-for-updates` — for Raycast,
     /// Shortcuts, scripts and agents.
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls where url.scheme == "kandong" {
@@ -58,6 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case "selection": model.perform(.lookupSelection, local: local)
             case "capture": model.perform(.captureScreen, local: local)
             case "settings": showMainWindow(tab: .settings)
+            case "check-for-updates": updater?.checkForUpdates()
             case "ai":
                 if let id = query.first(where: { $0.name == "backend" })?.value, model.settings.backend(id: id) != nil {
                     windowState.backendID = id
@@ -114,6 +119,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(menuItem("AI Backends", #selector(openAI)))
         menu.addItem(menuItem("Settings…", #selector(openSettings), key: ","))
         menu.addItem(.separator())
+        if let updater {
+            if let version = updater.pendingVersion {
+                menu.addItem(menuItem("Restart to Update to \(version)", #selector(restartToUpdate)))
+            }
+            menu.addItem(menuItem("Check for Updates…", #selector(checkForUpdates)))
+        }
         if let error = model.dictionaryError {
             let warning = NSMenuItem(title: "⚠︎ " + error, action: nil, keyEquivalent: "")
             warning.isEnabled = false
@@ -144,6 +155,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func openAI() { showMainWindow(tab: .ai) }
     @objc private func openSettings() { showMainWindow(tab: .settings) }
     @objc private func quit() { NSApp.terminate(nil) }
+    @objc private func checkForUpdates() { updater?.checkForUpdates() }
+    @objc private func restartToUpdate() { updater?.restartToUpdate() }
 
     // MARK: Main window
 
