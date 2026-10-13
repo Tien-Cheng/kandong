@@ -138,7 +138,7 @@ private final class FakeModel: @unchecked Sendable {
     }
 }
 
-@Suite struct AppleIntelligenceBackendTests {
+@Suite(.timeLimit(.minutes(1))) struct AppleIntelligenceBackendTests {
     let learn = AIRequest(system: "s", user: "你好", schema: Prompts.translationSchema)
 
     @Test func structuredRepliesComeFromGuidedGeneration() async throws {
