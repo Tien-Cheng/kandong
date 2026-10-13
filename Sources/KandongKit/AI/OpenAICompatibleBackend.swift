@@ -1,56 +1,12 @@
 import Foundation
 
-/// A model in LM Studio's native model list (`GET /api/v0/models`).
-public struct LMStudioModel: Hashable, Sendable, Identifiable {
-    public let id: String
-    /// "llm", "vlm" (can read images) or "embeddings".
-    public let type: String
-    /// "loaded" or "not-loaded".
-    public let state: String
-
-    public var canReadImages: Bool { type == "vlm" }
-    public var isLoaded: Bool { state == "loaded" }
-}
-
-public enum LMStudio {
-    public static let bundleID = "ai.elementlabs.lmstudio"
-    public static let startHint = "Open LM Studio and start the local server (Developer tab, or `lms server start`)."
-
-    /// Chat-capable models, loaded ones first.
-    public static func models(baseURL: String) async throws -> [LMStudioModel] {
-        guard let url = URL(string: rootURL(baseURL) + "/api/v0/models") else {
-            throw BackendError.serverUnavailable(name: "LM Studio", url: baseURL, hint: "Check the server URL.")
-        }
-        let data: Data
-        do {
-            var request = URLRequest(url: url)
-            request.timeoutInterval = 3
-            (data, _) = try await URLSession.shared.data(for: request)
-        } catch {
-            throw BackendError.serverUnavailable(name: "LM Studio", url: baseURL, hint: startHint)
-        }
-        let json = try JSONValue.decode(data)
-        let models = (json["data"]?.array ?? []).compactMap { item -> LMStudioModel? in
-            guard let id = item["id"]?.string else { return nil }
-            return LMStudioModel(id: id, type: item["type"]?.string ?? "llm", state: item["state"]?.string ?? "")
-        }
-        return models.filter { $0.type != "embeddings" }.sorted { $0.isLoaded && !$1.isLoaded }
-    }
-
-    /// "http://localhost:1234/v1" → "http://localhost:1234".
-    static func rootURL(_ baseURL: String) -> String {
-        var root = baseURL.trimmingCharacters(in: .whitespaces)
-        while root.hasSuffix("/") { root.removeLast() }
-        if root.hasSuffix("/v1") { root.removeLast(3) }
-        return root
-    }
-}
-
 /// Any server speaking OpenAI's `/chat/completions` API: LM Studio, Ollama, hosted APIs.
 public struct OpenAICompatibleBackend: AIBackend {
     public let config: BackendConfig
     public let settings: OpenAISettings
     public let apiKey: String?
+    /// Overrides `deadline(for:)`, for tests.
+    var timeLimit: Int?
 
     public init(config: BackendConfig, apiKey: String? = nil) {
         self.config = config
@@ -144,17 +100,29 @@ public struct OpenAICompatibleBackend: AIBackend {
         return id
     }
 
+    /// Small local models turn right readings wrong about as often as they fix one (see `KandongEval`),
+    /// so for Backends on this Mac the dictionary's readings stand.
+    public var correctsReadings: Bool { !config.isOnDevice }
+
+    /// Seconds a request may take in all. Thinking models can reason for minutes and a stuck one never
+    /// stops, so this is a hard limit, with more time for longer texts.
+    static func deadline(for request: AIRequest) -> Int {
+        (request.task == .explain ? 180 : 90) + request.expectedReplyLength / 20
+    }
+
     public func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    let model = try await resolveModel()
-                    var useSchema = request.schema != nil
-                    while true {
-                        let outcome = try await stream(request, model: model, useSchema: useSchema, continuation: continuation)
-                        // Some servers reject `response_format`; retry once relying on the prompt alone.
-                        if case .rejectedSchema = outcome, useSchema { useSchema = false; continue }
-                        break
+                    let seconds = timeLimit ?? Self.deadline(for: request)
+                    try await withThrowingTaskGroup(of: Void.self) { group in
+                        group.addTask { try await answer(request, continuation: continuation) }
+                        group.addTask {
+                            try await Task.sleep(for: .seconds(seconds))
+                            throw BackendError.timedOut(name: label, seconds: seconds)
+                        }
+                        defer { group.cancelAll() }
+                        try await group.next()
                     }
                     continuation.finish()
                 } catch {
@@ -165,7 +133,63 @@ public struct OpenAICompatibleBackend: AIBackend {
         }
     }
 
-    private enum Outcome { case done, rejectedSchema }
+    /// What one request asks of the server beyond the prompt.
+    struct Options: Equatable {
+        var useSchema: Bool
+        /// `reasoning_effort`, or nil to leave it to the model.
+        var effort: String?
+        /// Whether the model will think: false when it can't or is told not to, nil when unknown.
+        var thinks: Bool?
+
+        /// A cap on the reply when the model won't think: far more than any answer needs, so only a
+        /// rambling model reaches it. Thinking counts towards the cap, so a thinking model gets none,
+        /// and nor does reading an image, whose length isn't known.
+        func maxTokens(for request: AIRequest) -> Int? {
+            thinks == false && request.image == nil ? request.expectedReplyLength * 3 + 2048 : nil
+        }
+    }
+
+    /// The thinking level for this request's task, fitted to what an LM Studio model offers.
+    func options(for request: AIRequest, model: String, lmStudioModels: [LMStudioModel]?) -> Options {
+        let wanted = config.reasoning[request.task]
+        var options = Options(useSchema: request.schema != nil, effort: Reasoning.effort(wanted), thinks: wanted == "off" ? false : nil)
+        // LM Studio before 0.4 doesn't say whether a model thinks; then nothing is assumed either way.
+        if let info = lmStudioModels?.first(where: { $0.id == model }) {
+            guard let allowed = info.reasoningOptions else { return Options(useSchema: options.useSchema, effort: options.effort, thinks: nil) }
+            guard !allowed.isEmpty else { return Options(useSchema: options.useSchema, effort: nil, thinks: false) }
+            let level = Reasoning.resolve(wanted, allowed: allowed)
+            options.effort = Reasoning.effort(level)
+            options.thinks = level != "off"
+        }
+        return options
+    }
+
+    private func answer(_ request: AIRequest, continuation: AsyncThrowingStream<String, Error>.Continuation) async throws {
+        let lmStudioModels = isLMStudio ? try? await LMStudio.models(baseURL: baseURL) : nil
+        let model = try await resolveModel(lmStudioModels: lmStudioModels)
+        var options = options(for: request, model: model, lmStudioModels: lmStudioModels)
+        while true {
+            guard case .rejected(let status, let body) = try await stream(request, model: model, options: options, continuation: continuation) else { return }
+            // Some servers reject `reasoning_effort` or `response_format`; retry without the one they named.
+            if options.effort != nil, Self.namesParameter(body, "reasoning_effort") {
+                options.effort = nil
+                options.thinks = options.thinks == false ? nil : options.thinks
+            } else if options.useSchema {
+                options.useSchema = false
+            } else {
+                throw BackendError.http(status: status, body: body)
+            }
+        }
+    }
+
+    private enum Outcome { case done, rejected(status: Int, body: String) }
+
+    /// Whether an error names a request parameter, in its `param` field or its message.
+    static func namesParameter(_ body: String, _ parameter: String) -> Bool {
+        if let json = try? JSONValue.decode(Data(body.utf8)), let param = json["error"]?["param"]?.string { return param == parameter }
+        let text = body.lowercased()
+        return text.contains(parameter) || text.contains(parameter.replacingOccurrences(of: "_", with: " "))
+    }
 
     /// Servers word this differently: OpenAI "maximum context length" / context_length_exceeded,
     /// llama.cpp "exceeds the available context size", LM Studio "context length of only N tokens".
@@ -177,7 +201,7 @@ public struct OpenAICompatibleBackend: AIBackend {
     }
 
     private func stream(
-        _ request: AIRequest, model: String, useSchema: Bool,
+        _ request: AIRequest, model: String, options: Options,
         continuation: AsyncThrowingStream<String, Error>.Continuation
     ) async throws -> Outcome {
         guard let url = URL(string: baseURL + "/chat/completions") else {
@@ -190,16 +214,19 @@ public struct OpenAICompatibleBackend: AIBackend {
                 ["type": "image_url", "image_url": ["url": .string("data:image/png;base64," + image.base64EncodedString())]],
             ]
         }
+        // No temperature or other sampling settings: LM Studio and Ollama apply each model's own
+        // recommended ones, and overriding them (e.g. a low temperature on Qwen) makes models loop.
         var body: [String: JSONValue] = [
             "model": .string(model),
             "stream": true,
-            "temperature": .number(0.2),
             "messages": [
                 ["role": "system", "content": .string(request.system)],
                 ["role": "user", "content": userContent],
             ],
         ]
-        if useSchema, let schema = request.schema {
+        if let effort = options.effort { body["reasoning_effort"] = .string(effort) }
+        if let maxTokens = options.maxTokens(for: request) { body["max_tokens"] = .number(Double(maxTokens)) }
+        if options.useSchema, let schema = request.schema {
             body["response_format"] = [
                 "type": "json_schema",
                 "json_schema": ["name": "result", "strict": true, "schema": schema],
@@ -225,9 +252,12 @@ public struct OpenAICompatibleBackend: AIBackend {
             var text = ""
             for try await line in bytes.lines { text += line }
             if Self.isContextOverflow(status: status, body: text) { throw BackendError.contextTooLong }
-            if useSchema, status == 400 || status == 422 { return .rejectedSchema }
+            if status == 400 || status == 422 { return .rejected(status: status, body: text) }
             throw BackendError.http(status: status, body: text)
         }
+        let who = "\(name) · \(model)"
+        let detector = RepetitionDetector()
+        var reply = "", thinking = "", replyLength = 0, checked = 0, thought = false
         for try await line in bytes.lines {
             guard line.hasPrefix("data:") else { continue }
             let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
@@ -237,8 +267,26 @@ public struct OpenAICompatibleBackend: AIBackend {
                 if Self.isContextOverflow(status: 400, body: message) { throw BackendError.contextTooLong }
                 throw BackendError.failed(message)
             }
-            if let delta = json["choices"]?.array?.first?["delta"]?["content"]?.string, !delta.isEmpty {
-                continuation.yield(delta)
+            let choice = json["choices"]?.array?.first
+            let delta = choice?["delta"]
+            // LM Studio streams thinking as `reasoning_content`, OpenRouter and Ollama as `reasoning`.
+            if let reasoning = delta?["reasoning_content"]?.string ?? delta?["reasoning"]?.string, !reasoning.isEmpty {
+                if !thought { thought = true; await request.onThinking?() }
+                thinking = String((thinking + reasoning).suffix(1000))
+                if detector.isRepeating(thinking, source: request.user) { throw BackendError.repeating(name: who) }
+            }
+            if let content = delta?["content"]?.string, !content.isEmpty {
+                continuation.yield(content)
+                reply += content
+                replyLength += content.count
+                // Reading an image copies whatever it shows, repeats and all; the time limit still applies.
+                if request.image == nil, replyLength - checked >= 64 {
+                    checked = replyLength
+                    if detector.isRepeating(reply, source: request.user) { throw BackendError.repeating(name: who) }
+                }
+            }
+            if choice?["finish_reason"]?.string == "length" {
+                throw BackendError.cutOff(name: who)
             }
         }
         return .done

@@ -54,6 +54,10 @@ _Avoid_: Provider, model
 **Backend type**:
 How Kandong talks to a Backend: *Apple Intelligence* (Apple's model on this Mac), *Codex*, or *OpenAI-compatible* (LM Studio, Ollama, hosted APIs). Apple Intelligence and Codex exist once each; OpenAI-compatible Backends are added from presets.
 
+**Thinking**:
+How much a model reasons before it answers, set per Backend for translating and for explaining (off, low, … high, or the model's default).
+_Avoid_: Reasoning effort (in the UI)
+
 ## Learning
 
 **Vocabulary**:

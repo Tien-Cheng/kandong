@@ -18,6 +18,7 @@ final class AppModel {
             if normalized != settings { settings = normalized }
             saveSettings()
             applySettings(previous: oldValue)
+            stopStaleDownloads(previous: oldValue)
         }
     }
 
@@ -32,6 +33,12 @@ final class AppModel {
     private(set) var statuses: [String: BackendStatus] = [:]
     /// Bumped per Backend on each check, so a slow old check can't overwrite a newer result.
     @ObservationIgnored private var statusChecks: [String: Int] = [:]
+    /// The models Kandong recommends for LM Studio; the bundled list until the latest is fetched.
+    private(set) var modelCatalog = LocalModelCatalog.bundled
+    @ObservationIgnored private var catalogLoaded = false
+    /// A recommended model being downloaded into an LM Studio Backend, by Backend id.
+    private(set) var modelDownloads: [String: ModelDownload] = [:]
+    @ObservationIgnored private var downloadTasks: [String: Task<Void, Never>] = [:]
 
     @ObservationIgnored private var analyzerTask: Task<OfflineAnalyzer?, Never>?
     @ObservationIgnored private var hotkeys: HotkeyCenter!
@@ -133,6 +140,97 @@ final class AppModel {
         }
     }
 
+    // MARK: Local models
+
+    /// Fetches the latest recommended models once per launch.
+    func loadModelCatalog() async {
+        guard !catalogLoaded else { return }
+        catalogLoaded = true
+        modelCatalog = await LocalModelCatalog.load()
+    }
+
+    /// Downloads a recommended model into an LM Studio Backend, loads it, and makes it the Backend's model.
+    func download(_ recommended: RecommendedModel, into configID: String) {
+        guard modelDownloads[configID]?.isActive != true, let config = settings.backend(id: configID),
+              let baseURL = config.openAI?.baseURL else { return }
+        let modelBefore = config.openAI?.model ?? ""
+        modelDownloads[configID] = .downloading(model: recommended.id, fraction: 0, detail: "Starting…")
+        downloadTasks[configID] = Task {
+            do {
+                let job: String?
+                do {
+                    job = try await LMStudio.startDownload(recommended.id, baseURL: baseURL)
+                } catch BackendError.http(let status, _) where status == 404 {
+                    // LM Studio before 0.4 can't download through its API; show the model in LM Studio instead.
+                    finishDownload(configID, nil)
+                    if let url = LMStudio.deepLink(huggingFaceRepo: recommended.huggingFace) { NSWorkspace.shared.open(url) }
+                    return
+                }
+                if let job {
+                    polling: while true {
+                        let progress = try await LMStudio.download(job, baseURL: baseURL)
+                        switch progress.state {
+                        case .completed: break polling
+                        case .failed(let message): throw BackendError.failed(message)
+                        case .paused:
+                            modelDownloads[configID] = .downloading(model: recommended.id, fraction: progress.fraction, detail: "Paused in LM Studio")
+                        case .downloading:
+                            let detail = "\(Self.gigabytes(progress.downloadedBytes)) of \(Self.gigabytes(progress.totalBytes)) GB"
+                            modelDownloads[configID] = .downloading(model: recommended.id, fraction: progress.fraction, detail: detail)
+                        }
+                        try await Task.sleep(for: .seconds(1))
+                    }
+                }
+                modelDownloads[configID] = .loading(model: recommended.id)
+                try await LMStudio.load(recommended.id, baseURL: baseURL)
+                try Task.checkCancellation()
+                // Only if the Backend still talks to that server and no other model was picked meanwhile.
+                if let index = settings.backends.firstIndex(where: { $0.id == configID }),
+                   settings.backends[index].openAI?.baseURL == baseURL, (settings.backends[index].openAI?.model ?? "") == modelBefore {
+                    settings.backends[index].openAI?.model = recommended.id
+                }
+                finishDownload(configID, nil)
+            } catch {
+                // Stopped by `stopWatchingDownload`, which has already cleared it.
+                guard !Task.isCancelled else { return }
+                let message = LMStudio.isOutOfMemory(error)
+                    ? "This Mac doesn't have enough free memory to load \(recommended.name). Quit some apps, or unload other models in LM Studio, then try again."
+                    : error.localizedDescription
+                finishDownload(configID, .failed(model: recommended.id, message: message))
+            }
+            await refreshStatuses(only: configID)
+        }
+    }
+
+    private func finishDownload(_ configID: String, _ state: ModelDownload?) {
+        modelDownloads[configID] = state
+        downloadTasks[configID] = nil
+    }
+
+    /// Stops following a download; LM Studio carries on with it unless it's stopped there.
+    func stopWatchingDownload(for configID: String) {
+        downloadTasks[configID]?.cancel()
+        finishDownload(configID, nil)
+    }
+
+    /// A download is for one server: stop following it when its Backend goes or points elsewhere.
+    private func stopStaleDownloads(previous: AppSettings) {
+        for id in downloadTasks.keys where settings.backend(id: id)?.openAI?.baseURL != previous.backend(id: id)?.openAI?.baseURL {
+            stopWatchingDownload(for: id)
+        }
+    }
+
+    /// Makes an LM Studio Backend use a model it already has.
+    func useModel(_ id: String, for configID: String) {
+        guard let index = settings.backends.firstIndex(where: { $0.id == configID }) else { return }
+        settings.backends[index].openAI?.model = id
+        Task { await refreshStatuses(only: configID) }
+    }
+
+    private static func gigabytes(_ bytes: Int64) -> String {
+        String(format: "%.1f", Double(bytes) / 1e9)
+    }
+
     /// Checks every Backend (or one) and remembers whether it can answer.
     func refreshStatuses(only id: String? = nil) async {
         let configs = settings.backends.filter { id == nil || $0.id == id }
@@ -161,6 +259,15 @@ final class AppModel {
         statuses[config.id] = nil
     }
 
+    /// A fix's button title, e.g. "Get LM Studio" when the app it would open isn't installed.
+    func title(for fix: FixAction) -> String {
+        if case .openApp(let bundleID, _) = fix, bundleID == LMStudio.bundleID,
+           NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) == nil {
+            return "Get LM Studio"
+        }
+        return fix.label
+    }
+
     /// Does what a Backend's status suggests to make it ready.
     func perform(_ fix: FixAction) {
         switch fix {
@@ -175,6 +282,8 @@ final class AppModel {
         case .openApp(let bundleID, _):
             if let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
                 NSWorkspace.shared.openApplication(at: app, configuration: NSWorkspace.OpenConfiguration())
+            } else if bundleID == LMStudio.bundleID {
+                NSWorkspace.shared.open(LMStudio.website)
             }
         }
         Task {
@@ -363,10 +472,13 @@ final class AppModel {
                 session.analysis = analysis
                 countEncounters(in: analysis)
                 do {
-                    let (translation, corrected) = try await engine.learn(analysis, backend: backend) { progress in
-                        await MainActor.run { session.progress = progress }
-                    }
+                    let (translation, corrected) = try await engine.learn(analysis, backend: backend, progress: { progress in
+                        await MainActor.run { session.progress = progress; session.isThinking = false }
+                    }, thinking: {
+                        await MainActor.run { session.isThinking = true }
+                    })
                     session.progress = nil
+                    session.isThinking = false
                     guard !Task.isCancelled else { return }
                     session.analysis = corrected
                     session.translation = translation
@@ -376,15 +488,19 @@ final class AppModel {
                 } catch {
                     guard !Task.isCancelled else { return }
                     session.progress = nil
+                    session.isThinking = false
                     session.status = .failed(error.localizedDescription)
                     Task { await refreshStatuses(only: config.id) }
                 }
             } else {
                 do {
-                    let (reply, analysis) = try await engine.reverse(text, backend: backend) { progress in
-                        await MainActor.run { session.progress = progress }
-                    }
+                    let (reply, analysis) = try await engine.reverse(text, backend: backend, progress: { progress in
+                        await MainActor.run { session.progress = progress; session.isThinking = false }
+                    }, thinking: {
+                        await MainActor.run { session.isThinking = true }
+                    })
                     session.progress = nil
+                    session.isThinking = false
                     guard !Task.isCancelled else { return }
                     session.analysis = analysis
                     session.translation = reply.chinese
@@ -394,6 +510,7 @@ final class AppModel {
                 } catch {
                     guard !Task.isCancelled else { return }
                     session.progress = nil
+                    session.isThinking = false
                     session.status = .failed(error.localizedDescription)
                     Task { await refreshStatuses(only: config.id) }
                 }
@@ -413,7 +530,7 @@ final class AppModel {
         session.explanationError = nil
         let translation = session.direction == .learn ? session.translation : session.sourceText
         session.tasks.append(Task {
-            defer { session.isExplaining = false }
+            defer { session.isExplaining = false; session.isExplanationThinking = false }
             if session.explanationParts == nil {
                 session.explanation = ""
                 session.explanationParts = await engine.explanationParts(session.chineseText, translation: translation, backend: backend)
@@ -426,7 +543,9 @@ final class AppModel {
                 }
                 do {
                     let reference = parts.count == 1 ? translation : nil
-                    for try await delta in engine.explain(part, translation: reference, backend: backend) {
+                    let thinking: ThinkingHandler = { await MainActor.run { session.isExplanationThinking = true } }
+                    for try await delta in engine.explain(part, translation: reference, backend: backend, thinking: thinking) {
+                        session.isExplanationThinking = false
                         session.explanation += delta
                     }
                     parts.finishCurrent()

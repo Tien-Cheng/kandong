@@ -37,7 +37,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// `kandong://lookup?text=…[&local=1]`, `kandong://clipboard`, `kandong://selection`,
-    /// `kandong://capture` — for Raycast, Shortcuts, scripts and agents.
+    /// `kandong://capture`, `kandong://ai[?backend=<id>]`, `kandong://settings` — for Raycast,
+    /// Shortcuts, scripts and agents.
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls where url.scheme == "kandong" {
             let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
@@ -52,7 +53,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case "selection": model.perform(.lookupSelection, local: local)
             case "capture": model.perform(.captureScreen, local: local)
             case "settings": showMainWindow(tab: .settings)
-            case "ai": showMainWindow(tab: .ai)
+            case "ai":
+                if let id = query.first(where: { $0.name == "backend" })?.value, model.settings.backend(id: id) != nil {
+                    windowState.backendID = id
+                }
+                showMainWindow(tab: .ai)
             default: break
             }
         }
@@ -140,14 +145,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func showMainWindow(tab: MainTab) {
         windowState.tab = tab
         if mainWindow == nil {
-            let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 820, height: 600),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                backing: .buffered, defer: false
-            )
-            window.title = "Kandong"
+            // The sidebar layout puts its toggle and title in the window's toolbar; without a real
+            // toolbar it draws a stand-in strip over the top of the content.
+            let controller = NSHostingController(rootView: MainView(model: model, state: windowState) { [weak self] title in
+                self?.mainWindow?.title = title
+            })
+            controller.sceneBridgingOptions = [.toolbars]
+            let window = NSWindow(contentViewController: controller)
+            window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+            window.toolbar = NSToolbar(identifier: "MainWindow")
+            window.toolbarStyle = .unified
+            window.setContentSize(NSSize(width: 820, height: 600))
+            window.title = windowState.tab.title
             window.isReleasedWhenClosed = false
-            window.contentView = NSHostingView(rootView: MainView(model: model, state: windowState))
             window.setFrameAutosaveName("MainWindow")
             if !window.setFrameUsingName("MainWindow") { window.center() }
             mainWindow = window

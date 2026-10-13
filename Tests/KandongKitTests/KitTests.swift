@@ -345,11 +345,18 @@ struct LiveCodexTests {
 @Suite(.serialized) struct OpenAICompatibleTests {
     /// Starts the fake LM Studio server on a free port; the caller terminates it.
     func startServer(rejectSchema: Bool = false) async throws -> (Process, String) {
+        try await FakeLMStudio.start(rejectSchema ? ["--reject-schema"] : [])
+    }
+}
+
+enum FakeLMStudio {
+    /// Starts the fake LM Studio server with `flags` on a free port; the caller terminates it.
+    static func start(_ flags: [String] = []) async throws -> (Process, String) {
         let script = Bundle.module.url(forResource: "fake_lmstudio", withExtension: "py", subdirectory: "Fixtures")!
         let port = Int.random(in: 20_000...40_000)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        process.arguments = ["-I", script.path, "\(port)"] + (rejectSchema ? ["--reject-schema"] : [])
+        process.arguments = ["-I", script.path, "\(port)"] + flags
         try process.run()
         let base = "http://127.0.0.1:\(port)/v1"
         for _ in 0..<50 {
@@ -360,11 +367,22 @@ struct LiveCodexTests {
         throw BackendError.failed("fake server did not start")
     }
 
+    /// What the server was sent, one entry per chat request.
+    static func log(_ base: String) async throws -> [JSONValue] {
+        let (data, _) = try await URLSession.shared.data(from: URL(string: base.replacingOccurrences(of: "/v1", with: "/log"))!)
+        return try JSONValue.decode(data).array ?? []
+    }
+}
+
+extension OpenAICompatibleTests {
+
     @Test func listsModelsAndDetectsVision() async throws {
         let (server, base) = try await startServer()
         defer { server.terminate() }
         let models = try await LMStudio.models(baseURL: base)
-        #expect(models.map(\.id) == ["fake-vlm"], "embedding models are hidden")
+        #expect(models.map(\.id) == ["fake-vlm", "fake-plain"], "embedding models are hidden, loaded ones come first")
+        #expect(models[0].reasoningOptions == ["off", "on"] && models[0].canReadImages)
+        #expect(models[1].canThink == false && !models[1].canReadImages)
         let backend = OpenAICompatibleBackend(config: Self.config(.lmStudio, base))
         #expect(await backend.supportsImages())
         #expect(await !OpenAICompatibleBackend(config: Self.config(.lmStudio, base, vision: .no)).supportsImages())

@@ -41,9 +41,12 @@ final class LookupSession: Identifiable {
 
     /// Set while a text too long for the Backend is translated in parts.
     var progress: LookupProgress?
+    /// The model is thinking before it writes the Translation.
+    var isThinking = false
 
     var explanation = ""
     var isExplaining = false
+    var isExplanationThinking = false
     var explanationError: String?
     /// A long text is explained one part at a time; nil until the first Explain.
     var explanationParts: ExplanationParts?

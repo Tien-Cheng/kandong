@@ -82,6 +82,8 @@ struct KandongEval {
         Check(text: "@Lily want to grab hotpot tonight?", keep: ["@Lily"]),
         Check(text: "Shall we practise speaking together this weekend?"),
         Check(text: "I'll send you the link on WeChat later, check #HSK4", keep: ["#HSK4", "微信"]),
+        // Apple Intelligence once answered 注册或使用本地环境进行开发 ("register…"), echoing the prompt.
+        Check(text: "Build local multimodal agents with the first encoder-free architecture", keep: ["多模态"]),
     ]
 
     /// Explain: English Markdown that covers the key grammar point.
@@ -204,6 +206,7 @@ struct KandongEval {
                 var problems = KandongEval.missing(check, in: reply.chinese)
                 if !reply.chinese.containsHan { problems.append("no Chinese") }
                 if analysis.containsTraditional { problems.append("Traditional") }
+                if KandongEval.isUntranslated(reply.note) { problems.append("note not in English") }
                 if !problems.isEmpty { problems.append("got: \(reply.chinese)") }
                 score("reverse", check.text, problems)
             }

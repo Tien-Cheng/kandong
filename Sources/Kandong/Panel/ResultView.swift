@@ -122,7 +122,9 @@ private struct SessionView: View {
                 TranslationBox(text: progress.translation)
             }
             if let progress = session.progress, progress.isInParts {
-                ProgressRow(text: partProgressText(progress))
+                ProgressRow(text: partProgressText(progress) + (session.isThinking ? " Thinking…" : ""))
+            } else if session.isThinking {
+                ProgressRow(text: "Thinking before it answers…")
             } else if session.progress?.translation.isEmpty ?? true || session.direction == .reverse {
                 ProgressRow(text: session.direction == .reverse ? "Finding the Chinese…" : "Translating…")
             }
@@ -164,8 +166,12 @@ private struct SessionView: View {
                 } else {
                     SectionTitle("Explanation")
                 }
-                MarkdownText(markdown: Prompts.visibleText(session.explanation))
-                if session.isExplaining { ProgressView().controlSize(.small) }
+                MarkdownText(markdown: Prompts.unfenced(Prompts.visibleText(session.explanation)))
+                if session.isExplanationThinking {
+                    ProgressRow(text: "Thinking before it answers…")
+                } else if session.isExplaining {
+                    ProgressView().controlSize(.small)
+                }
                 if let error = session.explanationError, !session.explanation.isEmpty {
                     Text(error).font(.caption).foregroundStyle(.orange).lineLimit(2)
                 }
@@ -496,7 +502,7 @@ private struct FailureCard: View {
                 .textSelection(.enabled)
             HStack(spacing: 6) {
                 if let fix = status?.fix {
-                    Button(fix.label) { model.perform(fix) }
+                    Button(model.title(for: fix)) { model.perform(fix) }
                 }
                 Button("AI settings…") { AppDelegate.shared?.showMainWindow(tab: .ai) }
             }

@@ -35,6 +35,15 @@ public enum OpenAIPreset: String, Codable, CaseIterable, Sendable, Identifiable 
 
     /// Hosted services need an API key; local servers don't.
     public var needsKey: Bool { self == .openRouter || self == .openAI }
+
+    /// Small local models translate without thinking; hosted ones are left to decide.
+    public var defaultReasoning: ReasoningSettings {
+        switch self {
+        case .lmStudio: .local
+        case .ollama: ReasoningSettings(translate: "off", explain: "off")
+        case .openRouter, .openAI, .other: .modelDefault
+        }
+    }
 }
 
 /// One AI endpoint the user can choose for Lookups.
@@ -67,6 +76,12 @@ public struct BackendConfig: Codable, Hashable, Sendable, Identifiable {
     public var isBuiltIn: Bool { type != .openAICompatible }
 
     public var isLMStudio: Bool { preset == .lmStudio }
+
+    /// How much an OpenAI-compatible Backend's model thinks per task.
+    public var reasoning: ReasoningSettings {
+        get { openAI?.reasoning ?? (preset ?? .other).defaultReasoning }
+        set { openAI?.reasoning = newValue }
+    }
 
     /// Where its API key is kept in the Keychain.
     public var keychainAccount: String { "api-key-\(id)" }

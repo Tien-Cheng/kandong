@@ -10,7 +10,9 @@ public struct CodexSettings: Codable, Hashable, Sendable {
     public var executablePath = ""
     /// Model id; empty means Codex's default model.
     public var model = ""
+    /// Reasoning effort for Translations (and reading images).
     public var effort = "low"
+    public var explainEffort = "low"
 
     public init() {}
 }
@@ -21,6 +23,8 @@ public struct OpenAISettings: Codable, Hashable, Sendable {
     /// Model id; empty means the first available model.
     public var model = ""
     public var vision: VisionSupport = .auto
+    /// How much the model thinks per task; nil means the Backend's preset default.
+    public var reasoning: ReasoningSettings?
 
     public init(baseURL: String) {
         self.baseURL = baseURL
@@ -201,6 +205,7 @@ extension OpenAISettings {
         baseURL = try c.decode(String.self, forKey: .baseURL)
         model = (try? c.decodeIfPresent(String.self, forKey: .model)) ?? ""
         vision = (try? c.decodeIfPresent(VisionSupport.self, forKey: .vision)) ?? .auto
+        reasoning = try? c.decodeIfPresent(ReasoningSettings.self, forKey: .reasoning)
     }
 }
 
@@ -210,5 +215,7 @@ extension CodexSettings {
         executablePath = (try? c.decodeIfPresent(String.self, forKey: .executablePath)) ?? ""
         model = (try? c.decodeIfPresent(String.self, forKey: .model)) ?? ""
         effort = (try? c.decodeIfPresent(String.self, forKey: .effort)) ?? "low"
+        // Before it was per task, one effort applied to both.
+        explainEffort = (try? c.decodeIfPresent(String.self, forKey: .explainEffort)) ?? effort
     }
 }

@@ -31,11 +31,15 @@ enum MainTab: String, Hashable, CaseIterable, Identifiable {
 @Observable
 final class MainWindowState {
     var tab: MainTab = .history
+    /// The Backend whose settings the AI section shows.
+    var backendID = BackendConfig.appleIntelligence.id
 }
 
 struct MainView: View {
     let model: AppModel
     @Bindable var state: MainWindowState
+    /// Names the window after the section shown.
+    var setTitle: (String) -> Void = { _ in }
 
     var body: some View {
         NavigationSplitView {
@@ -49,13 +53,14 @@ struct MainView: View {
                 case .history: HistoryView(model: model).padding(12)
                 case .vocabulary: VocabularyView(model: model).padding(12)
                 case .terms: TermsView(model: model).padding(12)
-                case .ai: AIBackendsView(model: model)
+                case .ai: AIBackendsView(model: model, selectedID: $state.backendID)
                 case .settings: SettingsView(model: model)
                 }
             }
             .navigationTitle(state.tab.title)
         }
         .frame(minWidth: 760, minHeight: 520)
+        .onChange(of: state.tab, initial: true) { setTitle(state.tab.title) }
     }
 }
 
