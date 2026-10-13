@@ -44,7 +44,22 @@ Tests: `swift test`. Live Codex round-trips: `KANDONG_LIVE=1 swift test --filter
 | ⌃⌥V | Look up the clipboard (image or text) |
 | add ⇧ | …using the Local backend instead (e.g. for private messages) |
 
-All shortcuts can be changed in Settings. Esc closes the panel, 📌 keeps it open, and clicking a word reads it aloud. Lookups can also be scripted: `open "kandong://lookup?text=你好"`, `kandong://clipboard`, `kandong://selection`, `kandong://capture`, each optionally with `&local=1`.
+All shortcuts can be changed in Settings. Tap again while the panel is open to close it, or, for text that mixes Chinese and English, to say it all in Chinese instead (the 中 → EN button in the panel's header does the same).
+
+In the panel, click a word (or use ← →) to see what it means and save it to your Vocabulary:
+
+| Key | In the panel |
+|---|---|
+| ← → | Previous / next word |
+| Space | Say the word (or the whole text) |
+| S | Save the word to Vocabulary |
+| E | Explain |
+| R | Say it the other way (mixed Chinese and English) |
+| P | Pin: keep the panel open when clicking elsewhere |
+| ⇧⌘C | Copy the Translation (or the Chinese) |
+| Esc | Let go of the word, then close |
+
+Lookups can also be scripted: `open "kandong://lookup?text=你好"`, `kandong://clipboard`, `kandong://selection`, `kandong://capture`, each optionally with `&local=1`.
 
 ## AI backends
 
@@ -77,8 +92,8 @@ History and repeat-sighting counts are kept in `~/Library/Application Support/Ka
 
 ## Data
 
-Dictionary: [CC-CEDICT](https://www.mdbg.net/chinese/dictionary?page=cc-cedict) (CC BY-SA 4.0). HSK 3.0 levels: [complete-hsk-vocabulary](https://github.com/drkameleon/complete-hsk-vocabulary) (MIT). Both are downloaded by `scripts/fetch-data.sh` and not committed. The icon's 懂 is outlined from [LXGW WenKai](https://github.com/lxgw/LxgwWenKai) (SIL OFL 1.1).
+Dictionary: [CC-CEDICT](https://www.mdbg.net/chinese/dictionary?page=cc-cedict) (CC BY-SA 4.0). HSK 3.0 levels: [complete-hsk-vocabulary](https://github.com/drkameleon/complete-hsk-vocabulary) (MIT). Both are downloaded by `scripts/fetch-data.sh` and not committed. The Reading is set in [LXGW WenKai Lite](https://github.com/lxgw/LxgwWenKai-Lite) (SIL OFL 1.1), downloaded by the same script and bundled in the app; the icon's 懂 is outlined from [LXGW WenKai](https://github.com/lxgw/LxgwWenKai).
 
 ## License
 
-Code: [MIT](LICENSE). The dictionary data keeps its own licenses above; a built `Kandong.app` bundles it, so keep those notices if you redistribute the app.
+Code: [MIT](LICENSE). The dictionary data and the font keep their own licenses above; a built `Kandong.app` bundles them, so keep those notices if you redistribute the app.

@@ -9,11 +9,11 @@ One request by the user to understand a piece of text, producing a Result.
 _Avoid_: Query, translation request
 
 **Source**:
-Where a Lookup's text came from: a *Selection*, a *Screen capture*, or the *Clipboard*.
+Where a Lookup's text came from: a *Selection*, a *Screen capture*, the *Clipboard*, *Other app* (a `kandong://lookup` link), or *History* / *Vocabulary* in the main window.
 _Avoid_: Input
 
 **Direction**:
-Whether a Lookup is *Learn* (Chinese → English) or *Reverse* (English → Chinese); inferred from the text.
+Whether a Lookup is *Learn* (Chinese → English) or *Reverse* (English → Chinese); inferred from the text. Text mixing Chinese and English is Learn first and can be flipped to Reverse.
 _Avoid_: Mode, language pair
 
 **Result**:
@@ -24,7 +24,11 @@ The text with pinyin shown above each character, coloured by tone.
 _Avoid_: Ruby, pinyin view
 
 **Word breakdown**:
-The text split into words, each with its pinyin, gloss and HSK level.
+The text split into words, each with its pinyin, gloss and HSK level; a word read two ways (还 hái, 还 huán) appears once per reading.
+
+**Word card**:
+What one word picked in the Reading means, with Save and Say; shown at the bottom of the panel.
+_Avoid_: Popover, tooltip
 _Avoid_: Segmentation, word list
 
 **Add-on dictionary**:
