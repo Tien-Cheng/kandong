@@ -36,6 +36,8 @@ final class MainWindowState {
 struct MainView: View {
     let model: AppModel
     @Bindable var state: MainWindowState
+    /// Names the window after the section shown.
+    var setTitle: (String) -> Void = { _ in }
 
     var body: some View {
         NavigationSplitView {
@@ -56,6 +58,7 @@ struct MainView: View {
             .navigationTitle(state.tab.title)
         }
         .frame(minWidth: 760, minHeight: 520)
+        .onChange(of: state.tab, initial: true) { setTitle(state.tab.title) }
     }
 }
 

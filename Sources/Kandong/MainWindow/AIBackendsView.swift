@@ -303,7 +303,7 @@ private struct OpenAIFields: View {
             await refresh()
         }
         // A finished download adds a model to LM Studio's list.
-        .onChange(of: model.modelDownloads[config.id]) { Task { await refresh() } }
+        .onChange(of: model.modelDownloads[config.id]?.isActive == true) { Task { await refresh() } }
     }
 
     /// The levels the chosen LM Studio model offers; any server's otherwise. nil when it can't think.

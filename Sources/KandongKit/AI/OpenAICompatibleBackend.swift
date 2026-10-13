@@ -142,9 +142,10 @@ public struct OpenAICompatibleBackend: AIBackend {
         var thinks: Bool?
 
         /// A cap on the reply when the model won't think: far more than any answer needs, so only a
-        /// rambling model reaches it. Thinking counts towards the cap, so a thinking model gets none.
+        /// rambling model reaches it. Thinking counts towards the cap, so a thinking model gets none,
+        /// and nor does reading an image, whose length isn't known.
         func maxTokens(for request: AIRequest) -> Int? {
-            thinks == false ? request.expectedReplyLength * 3 + 2048 : nil
+            thinks == false && request.image == nil ? request.expectedReplyLength * 3 + 2048 : nil
         }
     }
 

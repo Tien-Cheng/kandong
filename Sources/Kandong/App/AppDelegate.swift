@@ -140,14 +140,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func showMainWindow(tab: MainTab) {
         windowState.tab = tab
         if mainWindow == nil {
-            let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 820, height: 600),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                backing: .buffered, defer: false
-            )
-            window.title = "Kandong"
+            // The sidebar layout puts its toggle and title in the window's toolbar; without a real
+            // toolbar it draws a stand-in strip over the top of the content.
+            let controller = NSHostingController(rootView: MainView(model: model, state: windowState) { [weak self] title in
+                self?.mainWindow?.title = title
+            })
+            controller.sceneBridgingOptions = [.toolbars]
+            let window = NSWindow(contentViewController: controller)
+            window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+            window.toolbar = NSToolbar(identifier: "MainWindow")
+            window.toolbarStyle = .unified
+            window.setContentSize(NSSize(width: 820, height: 600))
+            window.title = windowState.tab.title
             window.isReleasedWhenClosed = false
-            window.contentView = NSHostingView(rootView: MainView(model: model, state: windowState))
             window.setFrameAutosaveName("MainWindow")
             if !window.setFrameUsingName("MainWindow") { window.center() }
             mainWindow = window

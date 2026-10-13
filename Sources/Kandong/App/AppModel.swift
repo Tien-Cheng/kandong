@@ -153,7 +153,16 @@ final class AppModel {
         modelDownloads[configID] = .downloading(model: recommended.id, fraction: 0, detail: "Starting…")
         Task {
             do {
-                if let job = try await LMStudio.startDownload(recommended.id, baseURL: baseURL) {
+                let job: String?
+                do {
+                    job = try await LMStudio.startDownload(recommended.id, baseURL: baseURL)
+                } catch BackendError.http(let status, _) where status == 404 {
+                    // LM Studio before 0.4 can't download through its API; show the model in LM Studio instead.
+                    modelDownloads[configID] = nil
+                    if let url = LMStudio.deepLink(huggingFaceRepo: recommended.huggingFace) { NSWorkspace.shared.open(url) }
+                    return
+                }
+                if let job {
                     polling: while true {
                         let progress = try await LMStudio.download(job, baseURL: baseURL)
                         switch progress.state {
@@ -174,10 +183,6 @@ final class AppModel {
                     settings.backends[index].openAI?.model = recommended.id
                 }
                 modelDownloads[configID] = nil
-            } catch BackendError.http(let status, _) where status == 404 {
-                // LM Studio before 0.4 can't download through its API; show the model in LM Studio instead.
-                modelDownloads[configID] = nil
-                if let url = LMStudio.deepLink(huggingFaceRepo: recommended.huggingFace) { NSWorkspace.shared.open(url) }
             } catch {
                 let message = LMStudio.isOutOfMemory(error)
                     ? "This Mac doesn't have enough free memory to load \(recommended.name). Quit some apps, or unload other models in LM Studio, then try again."
