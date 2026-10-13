@@ -1,4 +1,4 @@
-<img src="assets/icon.svg" width="128" alt="Kandong icon: 懂 with a blue third-tone mark">
+<img src="assets/icon.png" width="128" alt="Kandong icon: 懂 with a blue third-tone mark">
 
 # Kandong 看懂
 
