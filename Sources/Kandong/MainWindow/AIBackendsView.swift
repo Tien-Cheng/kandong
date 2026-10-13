@@ -160,7 +160,7 @@ private struct BackendDetail: View {
                         .foregroundStyle(.secondary).lineLimit(3).textSelection(.enabled)
                     Spacer()
                     if let fix = model.statuses[config.id]?.fix {
-                        Button(fix.label) { model.perform(fix) }
+                        Button(model.title(for: fix)) { model.perform(fix) }
                     }
                     Button(testing ? "Testing…" : "Test", action: test).disabled(testing)
                 }
@@ -188,10 +188,10 @@ private struct BackendDetail: View {
         case .appleIntelligence:
             "Apple's model on this Mac: nothing to install or sign in to, and text never leaves this Mac. Needs Apple Intelligence turned on in System Settings."
         case .codex:
-            "Uses your ChatGPT subscription through the Codex CLI (`codex app-server`). Sign in with `codex login`. Lower effort answers faster."
+            "Uses your ChatGPT subscription through the Codex CLI (`codex app-server`). Sign in with `codex login`. Less thinking answers faster."
         case .openAICompatible:
             switch config.preset {
-            case .lmStudio?: "Runs fully on this Mac. In LM Studio, download a model and start the server: Developer tab, or `lms server start`. Pick a vision model to read screenshots."
+            case .lmStudio?: "Runs fully on this Mac. Install LM Studio and start its server (Developer tab, or `lms server start`), then download the recommended model here. Thinking makes small models slow and can stall them, so Kandong translates with it off."
             case .ollama?: "Runs fully on this Mac. Install Ollama, then `ollama pull` a model."
             case .openRouter?, .openAI?: "A hosted service: text is sent to it. The key is stored in your Keychain."
             default: "Any server speaking OpenAI's chat completions API. A key, if needed, is stored in your Keychain."
@@ -232,17 +232,20 @@ private struct CodexFields: View {
                 Text(model.settings.codex.model).tag(model.settings.codex.model)
             }
         }
-        Picker("Reasoning effort", selection: $model.settings.codex.effort) {
-            ForEach(effortOptions, id: \.self) { Text($0).tag($0) }
+        Picker("Thinking when translating", selection: $model.settings.codex.effort) {
+            ForEach(effortOptions(including: model.settings.codex.effort), id: \.self) { Text($0).tag($0) }
+        }
+        Picker("Thinking when explaining", selection: $model.settings.codex.explainEffort) {
+            ForEach(effortOptions(including: model.settings.codex.explainEffort), id: \.self) { Text($0).tag($0) }
         }
         TextField("codex path", text: $model.settings.codex.executablePath, prompt: Text("Found automatically"))
             .task { models = (try? await CodexAppServer.shared.models(executablePath: model.settings.codex.executablePath)) ?? [] }
     }
 
-    private var effortOptions: [String] {
+    private func effortOptions(including current: String) -> [String] {
         let fromModel = models.first { $0.id == model.settings.codex.model }?.reasoningEfforts ?? []
         let options = fromModel.isEmpty ? ["minimal", "low", "medium", "high"] : fromModel
-        return options.contains(model.settings.codex.effort) ? options : options + [model.settings.codex.effort]
+        return options.contains(current) ? options : options + [current]
     }
 }
 
@@ -250,6 +253,7 @@ private struct OpenAIFields: View {
     @Bindable var model: AppModel
     @Binding var config: BackendConfig
     @ViewState private var lmModels: [LMStudioModel] = []
+    @ViewState private var reachable = false
     @ViewState private var apiKey = ""
 
     private var settings: Binding<OpenAISettings> {
@@ -271,6 +275,9 @@ private struct OpenAIFields: View {
                     Task { await model.refreshStatuses(only: id) }
                 }
         }
+        if config.isLMStudio {
+            RecommendedModelRow(model: model, config: config, downloaded: lmModels.map(\.id), reachable: reachable)
+        }
         if config.isLMStudio && !lmModels.isEmpty {
             Picker("Model", selection: settings.model) {
                 Text("First loaded model").tag("")
@@ -284,6 +291,8 @@ private struct OpenAIFields: View {
         } else {
             TextField("Model", text: settings.model, prompt: Text("First model the server lists"))
         }
+        ThinkingPicker(title: "Thinking when translating", level: $config.reasoning.translate, options: thinkingOptions)
+        ThinkingPicker(title: "Thinking when explaining", level: $config.reasoning.explain, options: thinkingOptions)
         Picker("Reads images", selection: settings.vision) {
             Text(config.isLMStudio ? "Detect (vision models)" : "Auto (no)").tag(VisionSupport.auto)
             Text("Yes").tag(VisionSupport.yes)
@@ -293,11 +302,127 @@ private struct OpenAIFields: View {
             apiKey = Keychain.read(config.keychainAccount) ?? ""
             await refresh()
         }
+        // A finished download adds a model to LM Studio's list.
+        .onChange(of: model.modelDownloads[config.id]) { Task { await refresh() } }
+    }
+
+    /// The levels the chosen LM Studio model offers; any server's otherwise. nil when it can't think.
+    private var thinkingOptions: [String]? {
+        guard config.isLMStudio else { return [""] + Reasoning.openAILevels }
+        let chosen = settings.wrappedValue.model.isEmpty ? lmModels.first : lmModels.first { $0.id == settings.wrappedValue.model }
+        guard let chosen else { return Reasoning.levels.filter { $0 != "on" } }
+        return chosen.canThink ? chosen.reasoningOptions : nil
     }
 
     private func refresh() async {
         let id = config.id, baseURL = settings.wrappedValue.baseURL, isLMStudio = config.isLMStudio
-        if isLMStudio { lmModels = (try? await LMStudio.models(baseURL: baseURL)) ?? [] }
+        if isLMStudio {
+            let models = try? await LMStudio.models(baseURL: baseURL)
+            lmModels = models ?? []
+            reachable = models != nil
+        }
         await model.refreshStatuses(only: id)
+    }
+}
+
+/// How much a model thinks for one task. A model that can't think shows that instead of a menu; a level
+/// the model doesn't offer is used as the nearest one below it.
+private struct ThinkingPicker: View {
+    let title: String
+    @Binding var level: String
+    /// nil when the model can't think.
+    let options: [String]?
+
+    var body: some View {
+        if let options {
+            let shown = options.contains(level) ? options : options + [level]
+            Picker(title, selection: $level) {
+                ForEach(shown, id: \.self) { option in
+                    Text(Reasoning.displayName(option) + (options.contains(option) ? "" : " (uses \(Reasoning.displayName(Reasoning.resolve(option, allowed: options))))"))
+                        .tag(option)
+                }
+            }
+        } else {
+            LabeledContent(title) { Text("This model doesn't think").foregroundStyle(.secondary) }
+        }
+    }
+}
+
+/// The model Kandong recommends for this Mac, with a button to download it into LM Studio.
+private struct RecommendedModelRow: View {
+    let model: AppModel
+    let config: BackendConfig
+    /// Models LM Studio already has.
+    let downloaded: [String]
+    let reachable: Bool
+
+    var body: some View {
+        let catalog = model.modelCatalog
+        let memoryGB = Int((Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824).rounded())
+        LabeledContent {
+            if let recommended = catalog.recommendationForThisMac() {
+                content(for: recommended)
+            } else if let wanted = catalog.recommendation(memoryBytes: ProcessInfo.processInfo.physicalMemory, freeDiskBytes: nil) {
+                Text("Free up about \(Int(wanted.downloadGB.rounded(.up)) + 2) GB of disk to download \(wanted.name).")
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Local models need 16 GB of memory to run well. Apple Intelligence is the better choice on this Mac.")
+                    .foregroundStyle(.secondary)
+            }
+        } label: {
+            Text("Recommended for this Mac")
+            Text("\(memoryGB) GB memory")
+        }
+        .task { await model.loadModelCatalog() }
+    }
+
+    @ViewBuilder private func content(for recommended: RecommendedModel) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(recommended.name)
+                    Text("About \(String(format: "%.1f", recommended.downloadGB)) GB · \(recommended.note)")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                action(for: recommended)
+            }
+            switch model.modelDownloads[config.id] {
+            case .downloading(let id, let fraction, let detail)? where id == recommended.id:
+                ProgressView(value: fraction) { EmptyView() } currentValueLabel: { Text(detail).font(.caption) }
+            case .loading(let id)? where id == recommended.id:
+                ProgressRowLabel(text: "Loading it into memory…")
+            case .failed(let id, let message)? where id == recommended.id:
+                Text(message).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+            default:
+                EmptyView()
+            }
+        }
+    }
+
+    @ViewBuilder private func action(for recommended: RecommendedModel) -> some View {
+        let current = config.openAI?.model ?? ""
+        if model.modelDownloads[config.id]?.isActive == true {
+            EmptyView()
+        } else if current == recommended.id {
+            Label("In use", systemImage: "checkmark.circle.fill").foregroundStyle(.green).labelStyle(.titleAndIcon)
+        } else if downloaded.contains(recommended.id) {
+            Button("Use It") { model.useModel(recommended.id, for: config.id) }
+        } else {
+            Button(model.modelDownloads[config.id] == nil ? "Download" : "Try Again") { model.download(recommended, into: config.id) }
+                .disabled(!reachable)
+                .help(reachable ? "Downloads it in LM Studio" : "Start LM Studio's server first")
+        }
+    }
+}
+
+private struct ProgressRowLabel: View {
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ProgressView().controlSize(.small)
+            Text(text).font(.caption).foregroundStyle(.secondary)
+        }
     }
 }

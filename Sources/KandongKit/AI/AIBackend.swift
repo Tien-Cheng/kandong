@@ -12,9 +12,14 @@ public struct AIRequest: Sendable {
     public var expectedReplyLength: Int
     /// The JSON property worth showing while the reply is still coming in, e.g. "translation".
     public var streamField: String?
+    /// Sets how much the model may think before answering.
+    public var task: AITask
+    /// Called once if the model starts thinking before it answers, so the UI can say so.
+    public var onThinking: (@Sendable () async -> Void)?
 
     public init(
-        system: String, user: String, image: Data? = nil, schema: JSONValue? = nil, expectedReplyLength: Int = 500, streamField: String? = nil
+        system: String, user: String, image: Data? = nil, schema: JSONValue? = nil, expectedReplyLength: Int = 500,
+        streamField: String? = nil, task: AITask = .translate
     ) {
         self.system = system
         self.user = user
@@ -22,6 +27,7 @@ public struct AIRequest: Sendable {
         self.schema = schema
         self.expectedReplyLength = expectedReplyLength
         self.streamField = streamField
+        self.task = task
     }
 }
 
@@ -130,6 +136,10 @@ public enum BackendError: LocalizedError, Equatable {
     case refused(name: String)
     /// The model gave the text back, or only part of it, instead of translating it all.
     case untranslated
+    /// No complete answer within the time allowed.
+    case timedOut(name: String, seconds: Int)
+    /// The model got stuck saying the same thing over and over.
+    case repeating(name: String)
 
     public var errorDescription: String? {
         switch self {
@@ -157,6 +167,10 @@ public enum BackendError: LocalizedError, Equatable {
             "The AI didn't translate all of the text."
         case .refused(let name):
             "\(name) declined this text — try another backend."
+        case .timedOut(let name, let seconds):
+            "\(name) didn't finish within \(seconds) seconds. If it thinks before answering, turn thinking down in the AI tab, or try a smaller model."
+        case .repeating(let name):
+            "\(name) got stuck repeating itself. Try again, or pick another model in the AI tab."
         }
     }
 }

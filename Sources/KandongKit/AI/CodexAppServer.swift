@@ -409,7 +409,7 @@ public struct CodexBackend: AIBackend {
         AsyncThrowingStream { continuation in
             let task = Task {
                 await server.run(
-                    request, model: settings.model, effort: settings.effort,
+                    request, model: settings.model, effort: request.task == .explain ? settings.explainEffort : settings.effort,
                     executablePath: settings.executablePath, continuation: continuation
                 )
             }

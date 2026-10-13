@@ -73,6 +73,8 @@ public struct LookupProgress: Equatable, Sendable {
 }
 
 public typealias ProgressHandler = @Sendable (LookupProgress) async -> Void
+/// Hears that the model is thinking before it answers.
+public typealias ThinkingHandler = @Sendable () async -> Void
 
 /// The steps of a Lookup that don't involve the UI.
 public struct LookupEngine: Sendable {
@@ -93,12 +95,12 @@ public struct LookupEngine: Sendable {
     /// Text too long for the Backend is sent without the optional parts of the prompt, and only as
     /// a last resort in parts; `progress` hears about each part.
     public func learn(
-        _ analysis: OfflineAnalysis, backend: AIBackend, progress: ProgressHandler? = nil
+        _ analysis: OfflineAnalysis, backend: AIBackend, progress: ProgressHandler? = nil, thinking: ThinkingHandler? = nil
     ) async throws -> (translation: String, analysis: OfflineAnalysis) {
         let text = analysis.source
         let context = workspace.context()
         let parts = try await fitted(
-            text, backend: backend, steps: steps(askForReadings: backend.correctsReadings, context: context),
+            text, backend: backend, steps: steps(askForReadings: backend.correctsReadings, context: context), thinking: thinking,
             request: { part, preceding, step in
                 Prompts.learn(
                     text: part, analysis: analysis, context: step.context(context), terms: workspace.matchingTerms(in: part),
@@ -120,10 +122,12 @@ public struct LookupEngine: Sendable {
     }
 
     /// Asks the Backend how to say English text in Chinese, then analyses that Chinese.
-    public func reverse(_ text: String, backend: AIBackend, progress: ProgressHandler? = nil) async throws -> (reply: ReverseReply, analysis: OfflineAnalysis) {
+    public func reverse(
+        _ text: String, backend: AIBackend, progress: ProgressHandler? = nil, thinking: ThinkingHandler? = nil
+    ) async throws -> (reply: ReverseReply, analysis: OfflineAnalysis) {
         let context = workspace.context()
         let parts = try await fitted(
-            text, backend: backend, steps: steps(askForReadings: false, context: context),
+            text, backend: backend, steps: steps(askForReadings: false, context: context), thinking: thinking,
             request: { part, preceding, step in
                 Prompts.reverse(text: part, context: step.context(context), terms: workspace.matchingTerms(in: part), preceding: preceding)
             },
@@ -144,8 +148,10 @@ public struct LookupEngine: Sendable {
         return (reply, analyzer.analyze(reply.chinese))
     }
 
-    public func explain(_ text: String, translation: String?, backend: AIBackend) -> AsyncThrowingStream<String, Error> {
-        backend.respond(to: explainRequest(text, translation: translation))
+    public func explain(_ text: String, translation: String?, backend: AIBackend, thinking: ThinkingHandler? = nil) -> AsyncThrowingStream<String, Error> {
+        var request = explainRequest(text, translation: translation)
+        request.onThinking = thinking
+        return backend.respond(to: request)
     }
 
     private func explainRequest(_ text: String, translation: String?) -> AIRequest {
@@ -191,6 +197,7 @@ public struct LookupEngine: Sendable {
         _ text: String,
         backend: AIBackend,
         steps: [PromptStep],
+        thinking: ThinkingHandler? = nil,
         request: (_ part: String, _ preceding: String?, PromptStep) -> AIRequest,
         parse: (_ reply: String, _ part: String) throws -> Reply,
         progress: (_ done: [(text: String, reply: Reply)], _ total: Int?, _ current: String?) async -> Void
@@ -200,6 +207,8 @@ public struct LookupEngine: Sendable {
 
         // Sends one request, reporting the reply's `streamField` as it comes in.
         func ask(_ request: AIRequest, part: String) async throws -> Reply {
+            var request = request
+            request.onThinking = thinking
             var reply = ""
             var shown: String?
             for try await snapshot in backend.snapshots(of: request) {

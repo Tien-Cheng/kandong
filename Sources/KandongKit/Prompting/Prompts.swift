@@ -104,7 +104,8 @@ public enum Prompts {
     natural Simplified Chinese as a native speaker would write it, matching the user's tone. \
     Keep @mentions, hashtags and URLs unchanged. Use the user's Terms exactly. \
     Reply with one JSON object and nothing else: {"chinese": string, "note": string}. \
-    note: one short sentence on register or a common alternative phrasing, or "" if nothing useful.
+    note: one short sentence in English on how formal or casual it sounds, or a common alternative \
+    phrasing; "" if nothing useful. You MUST write the note in English.
     """
 
     static let explainSystem = """
@@ -183,7 +184,7 @@ public enum Prompts {
         user += "Text:\n\(text)"
         if let translation, !translation.isEmpty { user += "\n\nTranslation (for reference):\n\(translation)" }
         // Explanations run several times longer than the text.
-        return AIRequest(system: explainSystem, user: user, expectedReplyLength: 800 + text.count * 4)
+        return AIRequest(system: explainSystem, user: user, expectedReplyLength: 800 + text.count * 4, task: .explain)
     }
 
     public static func transcribe(image: Data) -> AIRequest {
@@ -222,6 +223,26 @@ public enum Prompts {
                 text.removeSubrange(open.lowerBound..<text.endIndex)
             }
         }
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return unfenced(text.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// The reply without the ```markdown fence models sometimes wrap Markdown in, which would show
+    /// as code. A part of a long Explanation can bring its own, so they go wherever they are; the
+    /// closing fence may not have arrived yet while the reply streams in.
+    static func unfenced(_ text: String) -> String {
+        var lines: [Substring] = []
+        var wrapped = false
+        for (index, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+            let trimmed = line.trimmingCharacters(in: .whitespaces).lowercased()
+            // A bare fence opening the whole reply wraps it too.
+            if !wrapped, trimmed == "```markdown" || trimmed == "```md" || (index == 0 && trimmed == "```") {
+                wrapped = true
+            } else if wrapped, trimmed == "```" {
+                wrapped = false
+            } else {
+                lines.append(line)
+            }
+        }
+        return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
