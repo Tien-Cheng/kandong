@@ -36,6 +36,8 @@ final class LookupSession: Identifiable {
     var backendIsLocal = false
     var showTraditional = false
     var historyID: Int64?
+    /// Shown again from History: the stored Translation with the dictionary's readings.
+    var isReopened = false
     /// Message shown instead of a Result (e.g. "No selection").
     var message: String?
 
@@ -61,6 +63,11 @@ final class LookupSession: Identifiable {
 
     init(source: LookupSource) {
         self.source = source
+    }
+
+    /// Mixed Chinese and English, which can be read as it is or said all in Chinese.
+    var canFlip: Bool {
+        !sourceText.isEmpty && Direction.isMixed(sourceText)
     }
 
     /// Text sent to Explain: always the Chinese.

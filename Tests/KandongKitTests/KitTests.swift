@@ -635,3 +635,20 @@ struct CannedBackend: AIBackend {
         #expect(config.readingModeSetting == nil && config.readingMode == .free)
     }
 }
+
+@Suite struct DirectionTests {
+    @Test func mixedTextCanGoEitherWay() {
+        #expect(Direction.isMixed("这个 feature 明天 ship 吗？"))
+        #expect(!Direction.isMixed("你好"), "all Chinese")
+        #expect(!Direction.isMixed("Hello there"), "all English")
+        #expect(!Direction.isMixed("@张三 看 https://example.com #AI 2026"), "mentions, links, tags and numbers aren't English to translate")
+        #expect(Direction.learn.flipped == .reverse)
+    }
+
+    @Test func settingsFromBeforeTheLevelQuestion() throws {
+        let decode = { (json: String) in try JSONDecoder().decode(AppSettings.self, from: Data(json.utf8)) }
+        #expect(try decode(#"{"myLevel": 3}"#).hasChosenLevel, "a level already set counts as answered")
+        #expect(try !decode(#"{"myLevel": 0}"#).hasChosenLevel)
+        #expect(try decode("{}").readingTypeface == .kai)
+    }
+}

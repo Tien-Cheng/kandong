@@ -83,24 +83,26 @@ private struct HistoryView: View {
             } else {
                 List(entries) { entry in
                     HStack(alignment: .top, spacing: 10) {
-                        Image(systemName: icon(entry.source)).foregroundStyle(.secondary).frame(width: 18)
+                        Image(systemName: entry.source.symbolName).foregroundStyle(.secondary).frame(width: 18)
+                            .help(entry.source.displayName)
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(entry.text).lineLimit(2).textSelection(.enabled)
+                            Text(entry.text.collapsingWhitespace).lineLimit(2).textSelection(.enabled)
                             if !entry.translation.isEmpty {
-                                Text(entry.translation).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled)
+                                Text(entry.translation.collapsingWhitespace).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled)
                             }
                             Text("\(entry.date.formatted(date: .abbreviated, time: .shortened)) · \(entry.backend)")
-                                .font(.caption2).foregroundStyle(.tertiary)
+                                .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Button("Look up") { model.lookup(text: entry.text, source: entry.source, local: false) }
+                        Button("Open") { model.reopen(entry) }
                             .controlSize(.small)
+                            .help(entry.translation.isEmpty ? "Look it up again" : "Show this Result again, without asking the AI")
                     }
                     .padding(.vertical, 2)
                     .contextMenu {
-                        Menu("Look up with") {
+                        Menu("Look up again with") {
                             ForEach(model.settings.backends) { config in
-                                Button(config.name) { model.lookup(text: entry.text, source: entry.source, config: config) }
+                                Button(config.name) { model.lookup(text: entry.text, source: .history, config: config) }
                             }
                         }
                         Button("Copy") {
@@ -122,14 +124,6 @@ private struct HistoryView: View {
 
     private func reload() {
         entries = model.history.recent(limit: 500, matching: search)
-    }
-
-    private func icon(_ source: LookupSource) -> String {
-        switch source {
-        case .selection: "text.cursor"
-        case .screenCapture: "camera.viewfinder"
-        case .clipboard: "doc.on.clipboard"
-        }
     }
 }
 
@@ -189,7 +183,7 @@ private struct VocabularyView: View {
 extension VocabularyView {
     private func lookUpSentence(of id: String?, in items: [VocabularyItem]) {
         guard let item = items.first(where: { $0.id == id }) else { return }
-        model.lookup(text: item.sourceSentence.isEmpty ? item.simplified : item.sourceSentence, source: .clipboard, local: false)
+        model.lookup(text: item.sourceSentence.isEmpty ? item.simplified : item.sourceSentence, source: .vocabulary, local: false)
     }
 }
 

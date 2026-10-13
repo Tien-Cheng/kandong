@@ -49,11 +49,14 @@ final class AppModel {
     @ObservationIgnored private var dictionaryGeneration = 0
     /// The add-on files the dictionary was loaded from, to notice changes made outside Kandong.
     @ObservationIgnored private var loadedAddOnSignature = ""
-    @ObservationIgnored private var hotkeys: HotkeyCenter!
-    @ObservationIgnored private var tapMonitor: ModifierTapMonitor!
+    @ObservationIgnored private var hotkeys: HotkeyCenter?
+    @ObservationIgnored private var tapMonitor: ModifierTapMonitor?
+    /// A model for rendering previews: no shortcuts, no saved settings, History in memory.
+    @ObservationIgnored let isPreview: Bool
     @ObservationIgnored lazy var panel = ResultPanelController(model: self)
 
     init() {
+        isPreview = false
         let stored = UserDefaults.standard.data(forKey: "settings").flatMap { try? JSONDecoder().decode(AppSettings.self, from: $0) }
         settings = stored ?? AppSettings()
         workspace = Workspace(path: (stored ?? AppSettings()).workspacePath)
@@ -67,15 +70,29 @@ final class AppModel {
         loadDictionary()
     }
 
+    /// A model that touches nothing outside itself, for rendering previews: `settings` as given, an
+    /// empty Workspace in `workspacePath`, History in memory, no shortcuts.
+    init(previewSettings: AppSettings, workspacePath: String) {
+        isPreview = true
+        var settings = previewSettings
+        settings.workspacePath = workspacePath
+        self.settings = settings
+        workspace = Workspace(path: workspacePath)
+        history = try! HistoryStore.inMemory()
+        try? workspace.ensureExists()
+        loadDictionary()
+    }
+
     // MARK: Settings
 
     private func saveSettings() {
+        guard !isPreview else { return }
         if let data = try? JSONEncoder().encode(settings) { UserDefaults.standard.set(data, forKey: "settings") }
     }
 
     private func applySettings(previous: AppSettings?) {
-        if previous?.hotkeys != settings.hotkeys || previous == nil { hotkeys.register(settings.hotkeys) }
-        tapMonitor.key = settings.tapKey
+        if previous?.hotkeys != settings.hotkeys || previous == nil { hotkeys?.register(settings.hotkeys) }
+        tapMonitor?.key = settings.tapKey
         if previous == nil || previous?.workspacePath != settings.workspacePath { openWorkspace() }
         if previous?.codex.executablePath != settings.codex.executablePath {
             Task { await CodexAppServer.shared.stop() }
@@ -84,7 +101,7 @@ final class AppModel {
 
     /// Lets the shortcut recorder capture keys that are currently registered.
     func suspendHotkeys(_ suspended: Bool) {
-        suspended ? hotkeys.unregisterAll() : hotkeys.register(settings.hotkeys)
+        suspended ? hotkeys?.unregisterAll() : hotkeys?.register(settings.hotkeys)
     }
 
     private func openWorkspace() {
@@ -182,7 +199,7 @@ final class AppModel {
 
     enum AddOnStatus: Equatable { case working, failed(String) }
 
-    private func readyEngine() async -> LookupEngine? {
+    func readyEngine() async -> LookupEngine? {
         reloadDictionariesIfChanged()
         if let engine { return engine }
         // The first load; a newer one may start while waiting, so wait for the latest.
@@ -384,6 +401,12 @@ final class AppModel {
     }
 
     private func lookupSelection(config: BackendConfig) {
+        // Asked again while the panel still has the keyboard: the user hasn't gone back to select
+        // something else. Mixed Chinese and English is said the other way; anything else closes.
+        if panel.isVisible, panel.isKey, let session {
+            session.canFlip ? flip(session) : panel.close()
+            return
+        }
         Task {
             let anchor = NSEvent.mouseLocation
             guard Permissions.accessibilityGranted else {
@@ -393,6 +416,12 @@ final class AppModel {
             }
             guard let selection = await SelectionReader.read() else {
                 showMessage("No selection — highlight some text first.", source: .selection, anchor: anchor)
+                return
+            }
+            // The same mixed Chinese and English again (e.g. with the panel pinned) says it the other way.
+            if let session, panel.isVisible, session.canFlip,
+               session.sourceText == selection.text.trimmingCharacters(in: .whitespacesAndNewlines) {
+                flip(session)
                 return
             }
             lookup(text: selection.text, source: .selection, config: config, anchor: selection.bounds ?? CGRect(origin: anchor, size: .zero))
@@ -493,10 +522,35 @@ final class AppModel {
         lookup(text: text, source: source, config: settings.backend(local: local), anchor: anchor)
     }
 
-    func lookup(text: String, source: LookupSource, config: BackendConfig, anchor: CGRect? = nil) {
+    func lookup(text: String, source: LookupSource, config: BackendConfig, anchor: CGRect? = nil, direction: Direction? = nil) {
         let session = startSession(source: source, config: config)
         if let anchor { panel.show(near: anchor) } else { panel.show(near: nil) }
-        run(session, text: text, config: config)
+        run(session, text: text, config: config, direction: direction)
+    }
+
+    /// Reads mixed Chinese and English the other way: as it is, or said all in Chinese.
+    func flip(_ session: LookupSession) {
+        guard session.canFlip else { return }
+        lookup(text: session.sourceText, source: session.source, config: session.backend, direction: session.direction.flipped)
+    }
+
+    /// Shows a History entry's Result again without asking the AI; looks it up again if it has none.
+    func reopen(_ entry: HistoryEntry) {
+        guard !entry.translation.isEmpty, let engine else {
+            lookup(text: entry.text, source: .history, local: false)
+            return
+        }
+        let config = settings.backends.first { backend(for: $0).label == entry.backend } ?? settings.backend(local: false)
+        let session = startSession(source: entry.source, config: config)
+        session.backendLabel = entry.backend
+        session.sourceText = entry.text
+        session.direction = entry.direction
+        session.historyID = entry.id
+        session.isReopened = true
+        session.analysis = engine.offline(entry.direction == .learn ? entry.text : entry.translation)
+        session.translation = entry.translation
+        session.status = .done
+        panel.show(near: nil)
     }
 
     /// Looks the same thing up again with another Backend, once; settings stay as they are.
@@ -519,10 +573,10 @@ final class AppModel {
         }
     }
 
-    private func run(_ session: LookupSession, text rawText: String, config: BackendConfig) {
+    private func run(_ session: LookupSession, text rawText: String, config: BackendConfig, direction: Direction? = nil) {
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         session.sourceText = text
-        session.direction = Direction.of(text)
+        session.direction = direction ?? Direction.of(text)
         session.status = .translating
         session.historyID = history.record(source: session.source, direction: session.direction, text: text)
         let backend = backend(for: config)
@@ -548,6 +602,7 @@ final class AppModel {
                     session.analysis = corrected
                     session.translation = translation
                     session.status = .done
+                    Self.announce("Translation ready")
                     if let id = session.historyID { history.setTranslation(id: id, translation: translation, backend: backend.label) }
                     if settings.alwaysExplain { explain(session) }
                 } catch {
@@ -571,6 +626,7 @@ final class AppModel {
                     session.translation = reply.chinese
                     session.note = reply.note.isEmpty ? nil : reply.note
                     session.status = .done
+                    Self.announce("Chinese ready")
                     if let id = session.historyID { history.setTranslation(id: id, translation: reply.chinese, backend: backend.label) }
                 } catch {
                     guard !Task.isCancelled else { return }
@@ -585,7 +641,8 @@ final class AppModel {
 
     /// Explains the text, or for a text too long for the Backend, its next part.
     func explain(_ session: LookupSession, with config: BackendConfig? = nil) {
-        guard !session.isExplaining, let engine else { return }
+        // Explain uses the Translation as a reference, so it waits for it.
+        guard !session.isExplaining, session.status != .translating, session.status != .readingImage, let engine else { return }
         if let config { session.explanationBackend = config }
         // The Backend this Lookup used (its current settings if it still exists), never a silent
         // switch to another one: a Local Lookup's text must stay on this Mac.
@@ -631,6 +688,12 @@ final class AppModel {
                 }
             }
         })
+    }
+
+    /// Tells VoiceOver users that something they're waiting for has arrived.
+    static func announce(_ message: String) {
+        NSAccessibility.post(element: NSApp as Any, notification: .announcementRequested,
+                             userInfo: [.announcement: message, .priority: NSAccessibilityPriorityLevel.medium.rawValue])
     }
 
     /// "Highlight Chinese anywhere and tap right ⌘, or press ⌃⌥L.", from the user's own shortcuts.

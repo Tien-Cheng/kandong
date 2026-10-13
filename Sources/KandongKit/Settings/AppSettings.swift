@@ -85,7 +85,11 @@ public struct AppSettings: Codable, Hashable, Sendable {
 
     /// HSK band at or below which words count as known; 0 = off.
     public var myLevel = 0
+    /// Whether the user has answered the panel's one-time question about My level.
+    public var hasChosenLevel = false
     public var pinyinForUnknownOnly = false
+    /// How the Chinese in the Reading is set.
+    public var readingTypeface: ReadingTypeface = .kai
     public var alwaysExplain = false
     public var workspacePath = "~/.config/kandong"
     public var historyRetentionDays = 90
@@ -136,8 +140,8 @@ public struct AppSettings: Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case backends, defaultBackendID, localBackendID, codex, hotkeys, tapKey, myLevel, pinyinForUnknownOnly
-        case alwaysExplain, workspacePath, historyRetentionDays
+        case backends, defaultBackendID, localBackendID, codex, hotkeys, tapKey, myLevel, hasChosenLevel, pinyinForUnknownOnly
+        case readingTypeface, alwaysExplain, workspacePath, historyRetentionDays
     }
 
     /// Before Backends were a list there was one LM Studio and one custom endpoint, chosen by kind.
@@ -163,6 +167,9 @@ public struct AppSettings: Codable, Hashable, Sendable {
         hotkeys = d.hotkeys.merging((try? c.decodeIfPresent([HotkeyAction: KeyCombo].self, forKey: .hotkeys)) ?? [:]) { $1 }
         tapKey = (try? c.decodeIfPresent(TapKey.self, forKey: .tapKey)) ?? d.tapKey
         myLevel = (try? c.decodeIfPresent(Int.self, forKey: .myLevel)) ?? d.myLevel
+        // Someone who already set a level has answered the question.
+        hasChosenLevel = (try? c.decodeIfPresent(Bool.self, forKey: .hasChosenLevel)) ?? (myLevel != 0)
+        readingTypeface = (try? c.decodeIfPresent(ReadingTypeface.self, forKey: .readingTypeface)) ?? d.readingTypeface
         pinyinForUnknownOnly = (try? c.decodeIfPresent(Bool.self, forKey: .pinyinForUnknownOnly)) ?? d.pinyinForUnknownOnly
         alwaysExplain = (try? c.decodeIfPresent(Bool.self, forKey: .alwaysExplain)) ?? d.alwaysExplain
         workspacePath = (try? c.decodeIfPresent(String.self, forKey: .workspacePath)) ?? d.workspacePath
@@ -217,5 +224,21 @@ extension CodexSettings {
         effort = (try? c.decodeIfPresent(String.self, forKey: .effort)) ?? "low"
         // Before it was per task, one effort applied to both.
         explainEffort = (try? c.decodeIfPresent(String.self, forKey: .explainEffort)) ?? effort
+    }
+}
+
+/// How the Chinese in the Reading is set: in LXGW WenKai, the regular-script face of Kandong's icon,
+/// or in the system's PingFang, as most apps show it.
+public enum ReadingTypeface: String, Codable, CaseIterable, Sendable, Identifiable {
+    case kai
+    case system
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .kai: "LXGW WenKai"
+        case .system: "System (PingFang)"
+        }
     }
 }

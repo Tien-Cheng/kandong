@@ -5,12 +5,21 @@ public enum LookupSource: String, Codable, Sendable {
     case selection
     case screenCapture
     case clipboard
+    /// Sent by another app or script through a `kandong://lookup` link.
+    case otherApp
+    /// Looked up again from History in the main window.
+    case history
+    /// A Vocabulary word's sentence, looked up from the main window.
+    case vocabulary
 
     public var displayName: String {
         switch self {
         case .selection: "Selection"
         case .screenCapture: "Screen capture"
         case .clipboard: "Clipboard"
+        case .otherApp: "Other app"
+        case .history: "History"
+        case .vocabulary: "Vocabulary"
         }
     }
 }
@@ -24,6 +33,14 @@ public enum Direction: String, Codable, Sendable {
     public static func of(_ text: String) -> Direction {
         text.containsHan ? .learn : .reverse
     }
+
+    /// Chinese mixed with English worth translating, which the user may want either way: read as it
+    /// is, or said all in Chinese.
+    public static func isMixed(_ text: String) -> Bool {
+        text.containsHan && LookupEngine.needsTranslation(english: String(text.map { $0.isHan ? " " : $0 }))
+    }
+
+    public var flipped: Direction { self == .learn ? .reverse : .learn }
 }
 
 /// A text explained one part at a time: the whole text unless it is too long for the Backend.
