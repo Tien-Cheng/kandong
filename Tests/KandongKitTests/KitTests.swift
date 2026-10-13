@@ -200,6 +200,76 @@ struct CorrectionTests {
         #expect(changed?.readingCorrected == true)
         #expect(changed?.alternativeReadings.first == "zhǎng dà")
     }
+
+    // MARK: Reverse
+
+    static let reverseEnglish = "We haven't tested it yet."
+
+    @Test func reverseAsksForReadingsOfItsOwnChinese() throws {
+        let analysis = TestData.analyzer!.analyze("我们还没测过。")
+        let choices = ReadingChoice.all(in: analysis)
+        #expect(choices.contains { $0.word == "还" })
+        let choose = try #require(Prompts.readings(of: analysis, english: Self.reverseEnglish, mode: .choose))
+        #expect(choose.user.contains(Self.reverseEnglish) && choose.user.contains(analysis.source))
+        #expect(choose.user.contains("\(choices[0].key) \(choices[0].word): \(choices[0].options.joined(separator: " | "))"))
+        let schema = try #require(choose.schema)
+        #expect(schema["required"] == ["readings"], "readings only: the Chinese is already written")
+        #expect(schema["properties"]?["readings"]?["properties"]?[choices[0].key]?["enum"] == .array(choices[0].options.map { .string($0) }))
+
+        let free = try #require(Prompts.readings(of: analysis, english: Self.reverseEnglish, mode: .free))
+        #expect(free.schema == Prompts.readingCorrectionsSchema)
+        #expect(free.user.contains("Dictionary pinyin"))
+
+        #expect(Prompts.readings(of: analysis, english: Self.reverseEnglish, mode: .off) == nil)
+        let plain = TestData.analyzer!.analyze("微信")
+        #expect(Prompts.readings(of: plain, english: "WeChat", mode: .choose) == nil, "nothing to choose: nothing to ask")
+        #expect(Prompts.readings(of: plain, english: "WeChat", mode: .free) == nil)
+    }
+
+    @Test func reverseTakesOnlyTheReadingsTheModeAsksFor() async throws {
+        let analyzer = TestData.analyzer!
+        let engine = LookupEngine(analyzer: analyzer, workspace: Workspace(path: NSTemporaryDirectory()))
+        let analysis = analyzer.analyze("我们还没测过。")
+        let dictionary = try #require(analysis.words.first { $0.text == "还" })
+        #expect(dictionary.pinyin != "hái", "the dictionary's guess is the one to correct")
+        let key = try #require(ReadingChoice.all(in: analysis).first { $0.word == "还" }).key
+        // A server ignoring the schema answers both ways, one of them made up.
+        let both = #"{"readings": {"\#(key)": "hái"}, "readingCorrections": [{"word": "还", "pinyin": "hài"}]}"#
+        func word(_ mode: ReadingMode, reply: String = both) async throws -> Segment? {
+            let backend = CannedBackend(reply: reply, readingMode: mode)
+            return try await engine.contextReadings(analysis, english: Self.reverseEnglish, backend: backend).words.first { $0.text == "还" }
+        }
+        let chosen = try #require(try await word(.choose))
+        #expect(chosen.pinyin == "hái")
+        #expect(chosen.readingCorrected)
+        #expect(chosen.definitions.first == "still")
+        #expect(try await word(.free)?.pinyin == "hài")
+        let corrected = try #require(try await word(.free, reply: #"{"readingCorrections": [{"word": "还", "pinyin": "hái"}]}"#))
+        #expect(corrected.pinyin == "hái" && corrected.readingCorrected)
+        #expect(corrected.definitions.first == "still")
+        #expect(try await word(.off)?.pinyin == dictionary.pinyin)
+    }
+
+    @Test func reverseKeepsDictionaryReadingsWhenThereIsNothingToAskOrNoRoom() async throws {
+        let analyzer = TestData.analyzer!
+        let engine = LookupEngine(analyzer: analyzer, workspace: Workspace(path: NSTemporaryDirectory()))
+        let analysis = analyzer.analyze("我们还没测过。")
+        #expect(try await engine.contextReadings(analysis, english: Self.reverseEnglish, backend: UnaskedBackend(readingMode: .off)) == analysis)
+        let plain = analyzer.analyze("微信")
+        #expect(try await engine.contextReadings(plain, english: "WeChat", backend: UnaskedBackend(readingMode: .choose)) == plain)
+        let full = UnaskedBackend(readingMode: .choose, fitsRequest: false)
+        #expect(try await engine.contextReadings(analysis, english: Self.reverseEnglish, backend: full) == analysis)
+
+        struct TooLong: AIBackend {
+            var label: String { "Too long" }
+            var readingMode: ReadingMode { .choose }
+            func supportsImages() async -> Bool { false }
+            func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> {
+                AsyncThrowingStream { $0.finish(throwing: BackendError.contextTooLong) }
+            }
+        }
+        #expect(try await engine.contextReadings(analysis, english: Self.reverseEnglish, backend: TooLong()) == analysis)
+    }
 }
 
 @Suite struct HistoryStoreTests {
@@ -611,6 +681,19 @@ struct CannedBackend: AIBackend {
     func supportsImages() async -> Bool { false }
     func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { $0.yield(reply); $0.finish() }
+    }
+}
+
+/// Fails the test if it is asked anything.
+struct UnaskedBackend: AIBackend {
+    var readingMode: ReadingMode
+    var fitsRequest: Bool?
+    var label: String { "Unasked" }
+    func supportsImages() async -> Bool { false }
+    func fits(_ request: AIRequest) async -> Bool? { fitsRequest }
+    func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> {
+        Issue.record("asked: \(request.user.prefix(80))")
+        return AsyncThrowingStream { $0.finish() }
     }
 }
 

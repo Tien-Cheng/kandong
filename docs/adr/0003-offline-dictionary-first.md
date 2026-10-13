@@ -19,3 +19,7 @@ We measured both modes with `KandongEval` on 39 多音字 sentences, 12 of which
 | Apple Intelligence | fixed 0 | 4, 0 worse |
 
 Small models make up readings or change nothing when free, and a fixed list helps them. A strong model is held back by the list. So Apple Intelligence and Backends on this Mac default to Choose, Codex and hosted Backends to Free, and the user can change it per Backend.
+
+## Update: Reverse gets context readings too
+
+A Reverse Lookup's Chinese is written by the model, and its Reading used to keep the dictionary's pinyin (我们还没测过 showed 还 as huán). Choose needs the Chinese's words to build its enum, and they don't exist until the reply does, so the readings can't be asked in the same request. Once the Chinese is in, Kandong sends the same Backend a second, readings-only request in its Reading corrections mode, with the English for meaning and no Translation. The Reading shows the dictionary's pinyin at once and updates when the answer lands. Nothing is sent when the mode is Off, no word has more than one reading, or the request doesn't fit; if it fails, the dictionary's readings stand and the Chinese is still shown.

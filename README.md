@@ -74,7 +74,7 @@ Pick and set up Backends in the **AI** section of the main window. Each one show
   - **Free** (Codex and hosted models): the AI corrects any reading.
   - **Off**: the dictionary's readings stand.
 
-  Changed readings are marked "context reading".
+  Changed readings are marked "context reading". Reverse Lookups get them too: once the Chinese is in, the same Backend is asked how it reads, and the Reading updates.
 - **Thinking**: each Backend sets how much its model thinks before answering, separately for translating and explaining. Local models translate with thinking off, since it makes small models slow and can stall them. Kandong leaves sampling settings (temperature and so on) to LM Studio and Ollama, which use each model's recommended ones, and stops a reply that runs too long or repeats itself.
 
 If a Backend can't answer, the panel says why and offers the others; click the Backend badge in the panel header to try another one at any time.

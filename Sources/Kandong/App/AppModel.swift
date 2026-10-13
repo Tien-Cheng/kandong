@@ -628,6 +628,16 @@ final class AppModel {
                     session.status = .done
                     Self.announce("Chinese ready")
                     if let id = session.historyID { history.setTranslation(id: id, translation: reply.chinese, backend: backend.label) }
+                    // The Reading shows the dictionary's pinyin until the same Backend says how its Chinese
+                    // reads in context; the Chinese is ready either way, so a failure here only keeps those.
+                    do {
+                        let corrected = try await engine.contextReadings(analysis, english: text, backend: backend)
+                        guard !Task.isCancelled, self.session === session else { return }
+                        session.analysis = corrected
+                    } catch {
+                        guard !Task.isCancelled else { return }
+                        lookupLog.error("context readings failed: \(error.localizedDescription, privacy: .public)")
+                    }
                 } catch {
                     guard !Task.isCancelled else { return }
                     session.progress = nil
