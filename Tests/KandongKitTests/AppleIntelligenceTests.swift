@@ -58,12 +58,25 @@ import UniformTypeIdentifiers
         }
     }
 
+    @available(macOS 27, *)
     @Test func mapsErrors() {
         let tooLong = LanguageModelError.contextSizeExceeded(.init(contextSize: 4096, tokenCount: 5000, debugDescription: ""))
         #expect(AppleIntelligenceBackend.backendError(from: tooLong) as? BackendError == .contextTooLong)
         let refusal = LanguageModelError.refusal(.init(explanation: "no", debugDescription: ""))
         #expect(AppleIntelligenceBackend.backendError(from: refusal) as? BackendError == .refused(name: "Apple Intelligence"))
-        #expect(AppleIntelligenceBackend.isRefusal(.guardrailViolation(.init(debugDescription: ""))))
+        #expect(AppleIntelligenceBackend.isRefusal(LanguageModelError.guardrailViolation(.init(debugDescription: ""))))
+        #expect(!AppleIntelligenceBackend.isRefusal(tooLong))
+    }
+
+    /// macOS 26 throws the older `GenerationError`.
+    @Test func mapsMacOS26Errors() {
+        let tooLong = LanguageModelSession.GenerationError.exceededContextWindowSize(.init(debugDescription: ""))
+        #expect(AppleIntelligenceBackend.backendError(from: tooLong) as? BackendError == .contextTooLong)
+        let guardrail = LanguageModelSession.GenerationError.guardrailViolation(.init(debugDescription: ""))
+        #expect(AppleIntelligenceBackend.backendError(from: guardrail) as? BackendError == .refused(name: "Apple Intelligence"))
+        let assets = LanguageModelSession.GenerationError.assetsUnavailable(.init(debugDescription: ""))
+        #expect(AppleIntelligenceBackend.backendError(from: assets) as? BackendError == .appleIntelligenceUnavailable(.modelNotReady))
+        #expect(AppleIntelligenceBackend.isRefusal(guardrail))
         #expect(!AppleIntelligenceBackend.isRefusal(tooLong))
     }
 }
@@ -154,6 +167,7 @@ private final class FakeModel: @unchecked Sendable {
         #expect(snapshots == [#"{"translation": "Hel"}"#, #"{"translation": "Hello"}"#])
     }
 
+    @available(macOS 27, *)
     @Test func retriesARefusalOnceAsPlainText() async throws {
         let model = FakeModel()
         model.structuredError = LanguageModelError.guardrailViolation(.init(debugDescription: ""))
@@ -163,6 +177,7 @@ private final class FakeModel: @unchecked Sendable {
         #expect(model.log == ["structured", "snapshots"])
     }
 
+    @available(macOS 27, *)
     @Test func aRefusalPartwayReplacesThePartialReply() async throws {
         let model = FakeModel()
         model.structuredBeforeError = [#"{"translation": "Wh"}"#]
@@ -174,9 +189,28 @@ private final class FakeModel: @unchecked Sendable {
         #expect(try await AppleIntelligenceBackend(client: model.client).complete(learn) == #"{"translation": "Hi"}"#)
     }
 
+    @available(macOS 27, *)
     @Test func doesNotRetryOtherErrors() async {
         let model = FakeModel()
         model.structuredError = LanguageModelError.contextSizeExceeded(.init(contextSize: 10, tokenCount: 20, debugDescription: ""))
+        await #expect(throws: BackendError.contextTooLong) {
+            _ = try await AppleIntelligenceBackend(client: model.client).complete(learn)
+        }
+        #expect(model.log == ["structured"])
+    }
+
+    @Test func retriesAMacOS26RefusalOnceAsPlainText() async throws {
+        let model = FakeModel()
+        model.structuredError = LanguageModelSession.GenerationError.guardrailViolation(.init(debugDescription: ""))
+        model.snapshots = [#"{"transl"#, #"{"translation": "Hi"}"#]
+        let reply = try await AppleIntelligenceBackend(client: model.client).complete(learn)
+        #expect(reply == #"{"translation": "Hi"}"#)
+        #expect(model.log == ["structured", "snapshots"])
+    }
+
+    @Test func doesNotRetryOtherMacOS26Errors() async {
+        let model = FakeModel()
+        model.structuredError = LanguageModelSession.GenerationError.exceededContextWindowSize(.init(debugDescription: ""))
         await #expect(throws: BackendError.contextTooLong) {
             _ = try await AppleIntelligenceBackend(client: model.client).complete(learn)
         }
@@ -238,6 +272,7 @@ struct LiveAppleIntelligenceTests {
         #expect(text.contains("过"))
     }
 
+    @available(macOS 27, *)
     @Test func readsTextInImages() async throws {
         #expect(await backend.supportsImages())
         let text = try await engine.transcribe(image: Self.png(of: "你好世界"), backend: backend)

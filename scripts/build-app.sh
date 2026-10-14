@@ -10,7 +10,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ./scripts/fetch-data.sh
-swift build -c release --product Kandong
+# Keep in step with Package.swift's platforms. The linker otherwise records the deployment target as
+# the SDK version (swiftc links with --sysroot, which clang doesn't read it from), and macOS then
+# runs Kandong with the older SDK's compatibility behaviour.
+MIN_MACOS=26.0
+SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version)"
+swift build -c release --product Kandong -Xlinker -platform_version -Xlinker macos -Xlinker "$MIN_MACOS" -Xlinker "$SDK_VERSION"
 BIN_DIR="$(swift build -c release --show-bin-path)"
 BIN="$BIN_DIR/Kandong"
 
@@ -32,7 +37,7 @@ DEV="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 if [[ -d "$DEV" ]]; then
   icon_tmp="$(mktemp -d)"; trap 'rm -rf "$icon_tmp"' EXIT
   if DEVELOPER_DIR="$DEV" xcrun actool assets/AppIcon.icon --compile "$icon_tmp" \
-      --platform macosx --target-device mac --minimum-deployment-target 27.0 --app-icon AppIcon \
+      --platform macosx --target-device mac --minimum-deployment-target "$MIN_MACOS" --app-icon AppIcon \
       --output-partial-info-plist "$icon_tmp/partial.plist" >/dev/null 2>&1 \
       && [[ -s "$icon_tmp/Assets.car" ]]; then
     cp "$icon_tmp/Assets.car" "$APP/Contents/Resources/"
@@ -61,7 +66,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleVersion</key><string>${BUILD}</string>
-  <key>LSMinimumSystemVersion</key><string>27.0</string>
+  <key>LSMinimumSystemVersion</key><string>${MIN_MACOS}</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
   <key>CFBundleURLTypes</key>

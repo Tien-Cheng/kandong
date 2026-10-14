@@ -143,12 +143,14 @@ public struct AppleIntelligenceBackend: AIBackend {
     }
 
     public func supportsImages() async -> Bool {
-        Self.unavailability == nil && SystemLanguageModel.default.capabilities.contains(.vision)
+        // Image input is new in macOS 27; on 26, screenshots fall back to on-device OCR.
+        guard #available(macOS 27, *) else { return false }
+        return Self.unavailability == nil && SystemLanguageModel.default.capabilities.contains(.vision)
     }
 
     /// Counts the prompt's tokens and leaves room for the reply (Chinese is about a token a character).
     public func fits(_ request: AIRequest) async -> Bool? {
-        guard Self.unavailability == nil, request.image == nil else { return nil }
+        guard #available(macOS 26.4, *), Self.unavailability == nil, request.image == nil else { return nil }
         let model = SystemLanguageModel.default
         do {
             var tokens = try await model.tokenCount(for: Instructions(request.system))
@@ -176,7 +178,7 @@ public struct AppleIntelligenceBackend: AIBackend {
                             for try await snapshot in client.structured(prompt, request.system, generationSchema) {
                                 continuation.yield(snapshot)
                             }
-                        } catch let error as LanguageModelError where Self.isRefusal(error) {
+                        } catch where Self.isRefusal(error) {
                             // Guided generation uses the default guardrails; retry once as plain text with the
                             // permissive ones (the system prompt already asks for JSON). Its snapshots replace
                             // any partial reply so far.
@@ -227,6 +229,9 @@ public struct AppleIntelligenceBackend: AIBackend {
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
             throw BackendError.failed("Couldn't read the image.")
         }
+        guard #available(macOS 27, *) else {
+            throw BackendError.failed("Apple Intelligence can't read images on this version of macOS.")
+        }
         return Prompt {
             request.user
             Attachment(image)
@@ -235,33 +240,66 @@ public struct AppleIntelligenceBackend: AIBackend {
 
     // MARK: Errors
 
-    static func isRefusal(_ error: LanguageModelError) -> Bool {
-        switch error {
-        case .guardrailViolation, .refusal: true
+    private static let refused = BackendError.refused(name: "Apple Intelligence")
+    private static let busy = "Apple Intelligence is busy."
+    private static let unsupportedLanguage = BackendError.failed("Apple Intelligence doesn't support this language.")
+
+    static func isRefusal(_ error: Error) -> Bool {
+        if #available(macOS 27, *), let error = error as? LanguageModelError {
+            switch error {
+            case .guardrailViolation, .refusal: return true
+            default: return false
+            }
+        }
+        return isLegacyRefusal(error)
+    }
+
+    static func backendError(from error: Error) -> Error {
+        if #available(macOS 27, *) {
+            switch error {
+            case let error as LanguageModelError:
+                switch error {
+                case .contextSizeExceeded: return BackendError.contextTooLong
+                case .guardrailViolation, .refusal: return refused
+                case .rateLimited(let info):
+                    let when = info.resetDate.map { " Try again after \($0.formatted(date: .omitted, time: .shortened))." } ?? " Try again shortly."
+                    return BackendError.failed(busy + when)
+                case .unsupportedLanguageOrLocale:
+                    return unsupportedLanguage
+                case .timeout:
+                    return BackendError.failed("Apple Intelligence took too long to answer.")
+                default:
+                    return BackendError.failed(error.localizedDescription)
+                }
+            case is SystemLanguageModel.Error:
+                return BackendError.appleIntelligenceUnavailable(.modelNotReady)
+            default:
+                break
+            }
+        }
+        return legacyBackendError(from: error) ?? error
+    }
+
+    // MARK: macOS 26
+
+    // macOS 26 throws `GenerationError`, which the macOS 27 SDK deprecates in favour of the errors above.
+
+    private static func isLegacyRefusal(_ error: Error) -> Bool {
+        switch error as? LanguageModelSession.GenerationError {
+        case .guardrailViolation?, .refusal?: true
         default: false
         }
     }
 
-    static func backendError(from error: Error) -> Error {
+    private static func legacyBackendError(from error: Error) -> Error? {
+        guard let error = error as? LanguageModelSession.GenerationError else { return nil }
         switch error {
-        case let error as LanguageModelError:
-            switch error {
-            case .contextSizeExceeded: return BackendError.contextTooLong
-            case .guardrailViolation, .refusal: return BackendError.refused(name: "Apple Intelligence")
-            case .rateLimited(let info):
-                let when = info.resetDate.map { " Try again after \($0.formatted(date: .omitted, time: .shortened))." } ?? " Try again shortly."
-                return BackendError.failed("Apple Intelligence is busy." + when)
-            case .unsupportedLanguageOrLocale:
-                return BackendError.failed("Apple Intelligence doesn't support this language.")
-            case .timeout:
-                return BackendError.failed("Apple Intelligence took too long to answer.")
-            default:
-                return BackendError.failed(error.localizedDescription)
-            }
-        case is SystemLanguageModel.Error:
-            return BackendError.appleIntelligenceUnavailable(.modelNotReady)
-        default:
-            return error
+        case .exceededContextWindowSize: return BackendError.contextTooLong
+        case .guardrailViolation, .refusal: return refused
+        case .rateLimited, .concurrentRequests: return BackendError.failed(busy + " Try again shortly.")
+        case .unsupportedLanguageOrLocale: return unsupportedLanguage
+        case .assetsUnavailable: return BackendError.appleIntelligenceUnavailable(.modelNotReady)
+        default: return BackendError.failed(error.localizedDescription)
         }
     }
 
