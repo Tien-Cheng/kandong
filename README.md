@@ -13,7 +13,7 @@ Highlight English instead and it shows how to say it in Chinese. See [GLOSSARY.m
 
 ## Install
 
-Needs macOS 27+. Translation works out of the box with Apple Intelligence (turn it on in System Settings → Apple Intelligence & Siri).
+Needs macOS 26+ (on macOS 26, screenshots are read with on-device OCR rather than by the model). Translation works out of the box with Apple Intelligence (turn it on in System Settings → Apple Intelligence & Siri).
 
 ```sh
 brew install --cask tien-cheng/tap/kandong

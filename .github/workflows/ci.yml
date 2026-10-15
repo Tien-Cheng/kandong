@@ -26,3 +26,24 @@ jobs:
       - run: swift test
       - name: Build the app (ad-hoc signed)
         run: scripts/build-app.sh
+      # ditto keeps the bundle's symlinks and signature, which upload-artifact would drop.
+      - run: ditto -c -k --keepParent build/Kandong.app Kandong.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Kandong-app
+          path: Kandong.zip
+          retention-days: 1
+
+  # Kandong supports macOS 26 but needs Xcode 27 to build, and no hosted runner has both, so the
+  # build above is launched on macOS 26 to catch anything 27-only that's linked unconditionally.
+  launch-macos-26:
+    needs: test
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: Kandong-app
+      - run: ditto -x -k Kandong.zip build
+      - run: scripts/launch-check.sh build/Kandong.app

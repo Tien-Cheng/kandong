@@ -8,6 +8,10 @@ git tag v0.2.0 && git push origin v0.2.0
 
 Tags with a `-` (`v0.2.0-beta.1`) are published as prereleases with no appcast, and leave the cask alone, so installed copies don't update to them.
 
+## macOS 26
+
+Kandong runs on macOS 26 but builds with Xcode 27, and no hosted runner has both, so CI only checks that the app launches on macOS 26 (`scripts/launch-check.sh`); its tests run on macOS 27. Before a release that changes Apple Intelligence or other OS-version-specific code, try a Lookup, a screenshot and a long text on a macOS 26 Mac.
+
 ## Why self-signed
 
 Releases aren't notarized, since that needs a paid Apple Developer account, so users click **Open Anyway** on first launch. Signing every release with the same certificate still matters: macOS ties Accessibility and Screen Recording grants to the signing identity, so an update signed with the same certificate keeps them, while ad-hoc builds would make users re-grant on every update. **Don't lose the certificate.** A new one makes every user re-grant permissions once.
