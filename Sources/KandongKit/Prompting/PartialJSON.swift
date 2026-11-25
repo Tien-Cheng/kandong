@@ -32,6 +32,52 @@ public enum PartialJSON {
         return nil
     }
 
+    /// The string values of the object under `key`, so far and in order: of
+    /// `{"passages": {"p01": "One.", "p02": "Tw` that's p01, complete, and p02, not.
+    public static func stringValues(inObject key: String, in text: String) -> [(key: String, value: String, isComplete: Bool)] {
+        let characters = Array(text)
+        guard var index = objectStart(of: key, in: characters) else { return [] }
+        var values: [(key: String, value: String, isComplete: Bool)] = []
+        func skip(_ isSkipped: (Character) -> Bool) {
+            while index < characters.count, isSkipped(characters[index]) { index += 1 }
+        }
+        while true {
+            skip { $0.isWhitespace || $0 == "," }
+            guard index < characters.count, characters[index] == "\"" else { return values }
+            let (name, nameEnd, nameComplete) = readString(characters, from: index + 1)
+            guard nameComplete else { return values }
+            index = nameEnd
+            skip { $0.isWhitespace || $0 == ":" }
+            guard index < characters.count, characters[index] == "\"" else { return values }
+            let (value, end, complete) = readString(characters, from: index + 1)
+            values.append((name, value, complete))
+            guard complete else { return values }
+            index = end
+        }
+    }
+
+    /// Just after the "{" of the object under the first `key` property.
+    private static func objectStart(of key: String, in characters: [Character]) -> Int? {
+        var index = 0
+        while index < characters.count {
+            guard characters[index] == "\"" else {
+                index += 1
+                continue
+            }
+            let (string, end, complete) = readString(characters, from: index + 1)
+            guard complete else { return nil }
+            index = end
+            guard string == key else { continue }
+            var next = index
+            while next < characters.count, characters[next].isWhitespace { next += 1 }
+            guard next < characters.count, characters[next] == ":" else { continue }
+            next += 1
+            while next < characters.count, characters[next].isWhitespace { next += 1 }
+            return next < characters.count && characters[next] == "{" ? next + 1 : nil
+        }
+        return nil
+    }
+
     /// Reads a JSON string body starting just after its opening quote: the text so far, the index
     /// after the closing quote, and whether the closing quote was reached. Stops before an escape
     /// that isn't complete or isn't valid.

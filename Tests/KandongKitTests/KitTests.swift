@@ -346,6 +346,25 @@ struct CorrectionTests {
         #expect(settings.backends.map(\.id) == ["apple-intelligence", "chatgpt", "lmstudio"], "built-ins can't be removed")
     }
 
+    @Test func aLookupOnThisMacNeverFollowsItsBackendElsewhere() {
+        var settings = AppSettings()
+        let used = settings.backend(id: "lmstudio")!
+        #expect(used.isOnDevice)
+        // Ordinary changes apply to what's asked next…
+        let index = settings.backends.firstIndex { $0.id == "lmstudio" }!
+        settings.backends[index].openAI?.model = "another"
+        #expect(settings.latest(of: used).openAI?.model == "another")
+        // …but not a URL that now leaves this Mac.
+        settings.backends[index].openAI?.baseURL = "https://api.example.com/v1"
+        #expect(settings.latest(of: used) == used)
+        // One the user knew was remote follows its settings; a removed one stays as it was.
+        let remote = settings.backends[index]
+        settings.backends[index].openAI?.model = "newer"
+        #expect(settings.latest(of: remote).openAI?.model == "newer")
+        settings.backends.remove(at: index)
+        #expect(settings.latest(of: remote) == remote)
+    }
+
     @Test func localBackendStopsBeingLocalWhenItsURLGoesRemote() {
         var settings = AppSettings()
         settings.localBackendID = "lmstudio"

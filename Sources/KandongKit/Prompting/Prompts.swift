@@ -195,6 +195,90 @@ public enum Prompts {
     Reply with one JSON object and nothing else: {"translation": string}
     """
 
+    // MARK: Passages
+
+    /// The replies' object of passages. It sorts before "readings", as "chinese" does before "note", so
+    /// a server that writes its reply in the schema's (sorted) order starts with what the user waits for.
+    static func passagesKey(_ direction: Direction) -> String { direction == .learn ? "passages" : "chinese" }
+
+    /// "p01"; padded, so sorting keeps the passages in order.
+    static func key(of passage: Passage, count: Int) -> String {
+        let digits = max(String(count).count, 2)
+        let number = String(passage.id + 1)
+        return "p" + String(repeating: "0", count: max(digits - number.count, 0)) + number
+    }
+
+    private static let passagesInstructions = """
+    The text is one continuous text in numbered passages, each marked with its id ([p01], [p02], …). \
+    Read all of it, then give each passage under its own id: every id has its own whole passage, \
+    nothing is moved to another id or left out, and the marks themselves are not repeated.
+
+    """
+
+    /// Passages by key, then (Learn) any reading corrections, or (Reverse) the note.
+    private static func passagesSchema(_ direction: Direction, _ keys: [String], then extra: (key: String, schema: JSONValue)?) -> JSONValue {
+        var properties: [String: JSONValue] = [
+            passagesKey(direction): [
+                "type": "object",
+                "additionalProperties": false,
+                "required": .array(keys.map { .string($0) }),
+                "properties": .object(Dictionary(uniqueKeysWithValues: keys.map { ($0, ["type": "string"]) })),
+            ],
+        ]
+        if let extra { properties[extra.key] = extra.schema }
+        return [
+            "type": "object",
+            "additionalProperties": false,
+            "required": .array(([passagesKey(direction)] + (extra.map { [$0.key] } ?? [])).map { .string($0) }),
+            "properties": .object(properties),
+        ]
+    }
+
+    private static func listed(_ passages: [Passage], count: Int) -> String {
+        passages.map { "[\(key(of: $0, count: count))] \($0.text)" }.joined(separator: "\n\n")
+    }
+
+    /// Learn for some of a long text's passages. `count` is how many it has in all.
+    public static func learn(
+        passages: [Passage], count: Int, analysis: OfflineAnalysis, context: String, terms: [Term], askForCorrections: Bool, preceding: String?
+    ) -> AIRequest {
+        let text = passages.map(\.text).joined(separator: "\n")
+        let ids = Set(passages.map(\.id))
+        let segments = analysis.passages.filter { ids.contains($0.id) }.flatMap { analysis.segments[$0.segments] }
+        let part = OfflineAnalysis(source: text, segments: Array(segments))
+        var user = steering(context: context, terms: terms, glossary: part.uniqueWords)
+        if !user.isEmpty { user += "\n\n" }
+        user += precedingNote(preceding) + "Text:\n" + listed(passages, count: count)
+        let keys = passages.map { key(of: $0, count: count) }
+        let example = #""passages": {"\#(keys[0])": string, ...}"#
+        let system = learnInstructions + passagesInstructions
+        // Each key and its quotes add a little to the Translation itself.
+        let length = replyLength(text) + passages.count * 10
+        guard askForCorrections else {
+            return AIRequest(system: system + "Reply with one JSON object and nothing else: {\(example)}", user: user,
+                             schema: passagesSchema(.learn, keys, then: nil), expectedReplyLength: length)
+        }
+        user += "\n\nDictionary pinyin:\n" + part.uniqueWords.map { "\($0.text) [\($0.pinyin)]" }.joined(separator: "\n")
+        return AIRequest(
+            system: system + "Reply with one JSON object and nothing else:\n{\(example), \"readingCorrections\": [{\"word\": string, \"pinyin\": string}]}\n\n" + correctionsInstructions,
+            user: user, schema: passagesSchema(.learn, keys, then: ("readingCorrections", correctionsProperty)), expectedReplyLength: length
+        )
+    }
+
+    /// Reverse for some of a long text's passages.
+    public static func reverse(passages: [Passage], count: Int, context: String, terms: [Term], preceding: String?) -> AIRequest {
+        var user = steering(context: context, terms: terms)
+        if !user.isEmpty { user += "\n\n" }
+        user += precedingNote(preceding) + "English:\n" + listed(passages, count: count)
+        let keys = passages.map { key(of: $0, count: count) }
+        return AIRequest(
+            system: reverseInstructions + " " + passagesInstructions
+                + "Reply with one JSON object and nothing else: {\"chinese\": {\"\(keys[0])\": string, ...}, \"note\": string}. " + noteInstructions,
+            user: user, schema: passagesSchema(.reverse, keys, then: ("note", ["type": "string"])),
+            expectedReplyLength: replyLength(passages.map(\.text).joined()) + passages.count * 10
+        )
+    }
+
     private static let learnInstructions = """
     You help an English-speaking learner read Chinese text they came across.
 
@@ -204,13 +288,18 @@ public enum Prompts {
 
     """
 
-    static let reverseSystem = """
+    static let reverseSystem = reverseInstructions
+        + " Reply with one JSON object and nothing else: {\"chinese\": string, \"note\": string}. " + noteInstructions
+
+    private static let reverseInstructions = """
     You help an English-speaking learner say things in Chinese. Translate the user's English into \
     natural Simplified Chinese as a native speaker would write it, matching the user's tone. \
     Keep @mentions, hashtags and URLs unchanged. Use the user's Terms exactly. \
     If the text already mixes in some Chinese, keep that Chinese and translate the rest, so the \
-    whole reply reads as natural Chinese. \
-    Reply with one JSON object and nothing else: {"chinese": string, "note": string}. \
+    whole reply reads as natural Chinese.
+    """
+
+    private static let noteInstructions = """
     note: one short sentence in English on how formal or casual it sounds, or a common alternative \
     phrasing; "" if nothing useful. You MUST write the note in English.
     """
@@ -352,6 +441,18 @@ public enum Prompts {
     /// A reply to `readings(of:english:mode:)`: a Learn reply without the Translation.
     public static func parseReadings(_ reply: String) throws -> LearnReply {
         try decode(ReadingsReply.self, from: reply).learnReply
+    }
+
+    /// A reply to a passages request: the passages by key, the reading corrections and the note.
+    static func parsePassages(
+        _ reply: String, _ direction: Direction
+    ) throws -> (texts: [String: String], corrections: [LearnReply.ReadingCorrection], note: String) {
+        let object = try decode(JSONValue.self, from: reply)
+        guard case .object(let passages)? = object[passagesKey(direction)] else {
+            throw BackendError.badResponse("no passages in reply: \(reply.prefix(200))")
+        }
+        let corrections = (try? parseReadings(reply))?.readingCorrections ?? []
+        return (passages.compactMapValues(\.string), corrections, object["note"]?.string ?? "")
     }
 
     /// Apple's model sometimes carries on after its answer by repeating the reply format its framework

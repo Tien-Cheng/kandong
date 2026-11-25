@@ -85,17 +85,20 @@ private final class FakeBackend: AIBackend, @unchecked Sendable {
     }
 }
 
-/// Sends its JSON reply a few characters at a time.
+/// Sends its JSON reply a few characters at a time, slower than the panel is updated.
 private struct TrickleBackend: AIBackend {
     let label = "Trickle"
     func supportsImages() async -> Bool { false }
     func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> {
         let reply = Array(#"{"translation": "Hello there"}"#)
         return AsyncThrowingStream { continuation in
-            for start in stride(from: 0, to: reply.count, by: 3) {
-                continuation.yield(String(reply[start..<min(start + 3, reply.count)]))
+            Task {
+                for start in stride(from: 0, to: reply.count, by: 5) {
+                    continuation.yield(String(reply[start..<min(start + 5, reply.count)]))
+                    try? await Task.sleep(for: Pace.interval + .milliseconds(10))
+                }
+                continuation.finish()
             }
-            continuation.finish()
         }
     }
 }
@@ -286,6 +289,14 @@ struct ChunkingTests {
         #expect(shown.count > 2 && shown.first!.count < shown.last!.count)
         #expect(shown.last == "Hello there")
         #expect(await events.events.allSatisfy { !$0.isInParts })
+    }
+
+    @Test func paceSpacesOutReports() {
+        var pace = Pace()
+        let start = ContinuousClock.now
+        var due: [Bool] = []
+        for after in [0, 40, 90, 100] { due.append(pace.isDue(now: start + .milliseconds(after))) }
+        #expect(due == [true, false, true, false])
     }
 
     @Test func keepsLineBreaksBetweenParts() {

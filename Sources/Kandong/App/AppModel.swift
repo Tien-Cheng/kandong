@@ -677,15 +677,65 @@ final class AppModel {
         session.direction = entry.direction
         session.historyID = entry.id
         session.isReopened = true
-        session.analysis = engine.offline(entry.direction == .learn ? entry.text : entry.translation)
-        session.translation = entry.translation
         session.status = .done
         panel.show(near: nil)
+        // Everything is shown at once, when it has been read: until then there is nothing to retry.
+        session.tasks.append(Task {
+            let isLearn = entry.direction == .learn
+            let split = await Self.split(entry.text)
+            // Passages read the way they were translated; an older entry's Translation is shown whole.
+            let isKept = !split.isEmpty && split.count == entry.passages.count
+            let states = split.map { PassageState($0, direction: entry.direction) }
+            for (state, translation) in zip(states, entry.passages) where isKept {
+                state.translation = translation.isEmpty ? nil : translation
+                state.status = translation.isEmpty && state.needsTranslation ? .missing : .done
+            }
+            if !isKept { states.forEach { $0.status = .done } }
+            let analysis: OfflineAnalysis
+            if !isLearn, isKept {
+                let chinese = Self.chinesePassages(of: states)
+                analysis = await Task.detached(priority: .userInitiated) { engine.analyzer.analyze(chinese, source: entry.translation) }.value
+            } else {
+                analysis = await Self.analyse(isLearn ? entry.text : entry.translation, with: engine)
+            }
+            guard !Task.isCancelled, self.session === session else { return }
+            session.translation = entry.translation
+            if isLearn || isKept {
+                session.show(states)
+            } else if !analysis.passages.isEmpty {
+                // An old Reverse entry's Chinese, long enough for passages of its own, has no English beside them.
+                session.split(into: analysis.passages.map(\.passage))
+                session.passages.forEach { $0.status = .done }
+                session.hidesSourcePassages = true
+            }
+            session.analysis = analysis
+        })
+    }
+
+    private static func split(_ text: String) async -> [Passage] {
+        await Task.detached(priority: .userInitiated) { Passage.split(text) }.value
+    }
+
+    /// Reverse: the passages' Chinese so far, as passages of their own.
+    private static func chinesePassages(of states: [PassageState]) -> [Passage] {
+        states.compactMap { state in
+            let chinese = state.translation ?? (state.needsTranslation ? nil : state.passage.text)
+            return chinese.map { Passage(id: state.id, text: $0.replacingOccurrences(of: "\n", with: ""), leading: state.passage.leading) }
+        }
+    }
+
+    /// The dictionary's Reading, off the main thread: a long text takes a tenth of a second or more.
+    private static func analyse(_ text: String, with engine: LookupEngine) async -> OfflineAnalysis {
+        await Task.detached(priority: .userInitiated) { engine.offline(text) }.value
     }
 
     /// Looks the same thing up again with another Backend, once; settings stay as they are.
     func retry(_ session: LookupSession, with config: BackendConfig) {
-        if case .failed = session.status {
+        // A long text that's partly translated: only the rest.
+        if session.status != .translating, session.passages.contains(where: { $0.status == .done && $0.needsTranslation }),
+           !session.untranslated.isEmpty {
+            translateRest(of: session, with: config)
+        } else if case .failed = session.status {
             lookUpAgain(session, with: config)
         } else if session.explanationError != nil {
             explain(session, with: config)
@@ -716,10 +766,21 @@ final class AppModel {
                 session.status = .failed(dictionaryError ?? "Dictionary not loaded.")
                 return
             }
-            if session.direction == .learn {
-                let analysis = engine.offline(text)
+            let passages = session.direction == .reverse ? await Self.split(text) : []
+            guard !Task.isCancelled, self.session === session else { return }
+            if !passages.isEmpty {
+                session.split(into: passages)
+                await translatePassages(session.untranslated, of: session, engine: engine, backend: backend, config: config)
+            } else if session.direction == .learn {
+                let analysis = await Self.analyse(text, with: engine)
+                guard !Task.isCancelled, self.session === session else { return }
+                session.split(into: analysis.passages.map(\.passage))
                 session.analysis = analysis
                 countEncounters(in: analysis)
+                if session.isLong {
+                    await translatePassages(session.untranslated, of: session, engine: engine, backend: backend, config: config)
+                    return
+                }
                 do {
                     let (translation, corrected) = try await engine.learn(analysis, backend: backend, progress: { progress in
                         await MainActor.run { session.progress = progress; session.isThinking = false }
@@ -779,15 +840,190 @@ final class AppModel {
         })
     }
 
+    // MARK: Passages
+
+    /// Translates some of a long text's passages, keeping whatever could be translated.
+    private func translatePassages(
+        _ wanted: [PassageState], of session: LookupSession, engine: LookupEngine, backend: AIBackend, config: BackendConfig
+    ) async {
+        let all = session.passages.map(\.passage)
+        session.readingTask?.cancel()
+        wanted.forEach { $0.status = .waiting }
+        session.status = .translating
+        let progress: PassageHandler = { progress in
+            await MainActor.run {
+                guard self.session === session, !Task.isCancelled else { return }
+                session.isThinking = false
+                for state in wanted {
+                    guard let text = progress.texts[state.id] else {
+                        // One that was shown but didn't count (a copy, say) is waiting again.
+                        if state.status != .waiting { state.status = .waiting; state.translation = nil }
+                        continue
+                    }
+                    if state.translation != text { state.translation = text }
+                    let status: PassageState.Status = progress.current == state.id ? .translating : .done
+                    if state.status != status { state.status = status }
+                }
+            }
+        }
+        let thinking: ThinkingHandler = { await MainActor.run { session.isThinking = true } }
+        do {
+            let replies: PassageReplies
+            if session.direction == .learn {
+                guard let analysis = session.analysis else { throw BackendError.failed("The text hasn't been read yet.") }
+                let (learned, corrected) = try await engine.learnPassages(analysis, wanted: wanted.map(\.passage), backend: backend, progress: progress, thinking: thinking)
+                replies = learned
+                guard !Task.isCancelled, self.session === session else { return }
+                if corrected != session.analysis { session.analysis = corrected }
+            } else {
+                let reading = Task { await readChinese(as: session, engine: engine) }
+                defer { reading.cancel() }
+                replies = try await engine.reversePassages(wanted.map(\.passage), of: all, backend: backend, progress: progress, thinking: thinking)
+                guard !Task.isCancelled, self.session === session else { return }
+            }
+            session.isThinking = false
+            for state in wanted {
+                state.translation = replies.texts[state.id]
+                state.status = replies.texts[state.id] == nil ? .missing : .done
+            }
+            session.translation = session.joinedTranslation
+            if session.note == nil, !replies.note.isEmpty { session.note = replies.note }
+            if session.direction == .reverse { await analyseChinese(of: session, engine: engine) }
+            guard !Task.isCancelled, self.session === session else { return }
+            let failure = session.untranslated.isEmpty ? nil : replies.error
+            session.status = failure.map { .failed($0.localizedDescription) } ?? .done
+            if replies.texts.isEmpty {
+                if failure != nil { Task { await refreshStatuses(only: config.id) } }
+                return
+            }
+            Self.announce(session.direction == .learn ? "Translation ready" : "Chinese ready")
+            if let id = session.historyID {
+                history.setTranslation(id: id, translation: session.translation ?? "", backend: backend.label,
+                                       passages: session.passages.map { $0.translation ?? "" })
+            }
+            if failure != nil { Task { await refreshStatuses(only: config.id) } }
+            if settings.alwaysExplain, let first = session.passages.first(where: { $0.hasWords && !$0.isExplained && $0.status == .done }),
+               session.passages.allSatisfy({ !$0.isExplained }) {
+                explain(first, of: session)
+            }
+            session.readingTask = Task { await readInContext(session, engine: engine, backend: backend) }
+        } catch {
+            guard !Task.isCancelled else { return }
+            session.isThinking = false
+            for state in wanted where state.status != .done { state.status = .missing; state.translation = nil }
+            session.status = .failed(error.localizedDescription)
+            Task { await refreshStatuses(only: config.id) }
+        }
+    }
+
+    /// Reverse: shows each passage's Reading soon after its Chinese is in, rather than all at the end.
+    private func readChinese(as session: LookupSession, engine: LookupEngine) async {
+        var read = 0
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(400))
+            let finished = session.passages.count { $0.status == .done }
+            guard !Task.isCancelled, finished > read else { continue }
+            read = finished
+            await analyseChinese(of: session, engine: engine)
+        }
+    }
+
+    private func analyseChinese(of session: LookupSession, engine: LookupEngine) async {
+        let finished = Set(session.passages.filter { $0.status == .done }.map(\.id))
+        let chinese = Self.chinesePassages(of: session.passages).filter { finished.contains($0.id) }
+        let source = Passage.join(chinese) { $0.text }
+        guard !chinese.isEmpty, source != session.analysis?.source else { return }
+        let analysis = await Task.detached(priority: .userInitiated) { engine.analyzer.analyze(chinese, source: source) }.value
+        guard !Task.isCancelled, self.session === session else { return }
+        session.analysis = analysis
+    }
+
+    /// The dictionary's readings stand until the Backend says how the words read in context. Runs in
+    /// `session.readingTask`; once that's cancelled, nothing more is written.
+    private func readInContext(_ session: LookupSession, engine: LookupEngine, backend: AIBackend) async {
+        guard let analysis = session.analysis else { return }
+        do {
+            if session.direction == .reverse {
+                // The whole of it: its Chinese was read again, from the dictionary, as passages came in.
+                let corrected = try await engine.contextReadings(analysis, english: session.sourceText, backend: backend)
+                guard !Task.isCancelled, self.session === session else { return }
+                session.analysis = corrected
+                return
+            }
+            var translations: [Int: String] = [:]
+            for state in session.passages where state.status == .done && !session.readInContext.contains(state.id) {
+                translations[state.id] = state.translation
+            }
+            try await engine.contextReadings(analysis, translations: translations, backend: backend) { corrected, read in
+                await MainActor.run {
+                    guard self.session === session, !Task.isCancelled else { return }
+                    session.analysis = corrected
+                    session.readInContext.formUnion(read)
+                }
+            }
+        } catch {
+            guard !Task.isCancelled else { return }
+            lookupLog.error("context readings failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Asks `config` for the passages that are still missing, or for one of them.
+    func translateRest(of session: LookupSession, with config: BackendConfig? = nil, only passage: PassageState? = nil) {
+        guard session.status != .translating else { return }
+        let wanted = passage.map { [$0] } ?? session.untranslated
+        guard !wanted.isEmpty else { return }
+        // The Backend this Lookup used unless the user picked another, never a silent switch.
+        let chosen = config ?? settings.latest(of: session.backend)
+        let backend = backend(for: chosen)
+        session.backend = chosen
+        session.backendLabel = backend.label
+        session.backendIsLocal = chosen.isOnDevice
+        session.status = .translating
+        session.tasks.append(Task {
+            guard let engine = await readyEngine() else { return }
+            await translatePassages(wanted, of: session, engine: engine, backend: backend, config: chosen)
+        })
+    }
+
+    /// Explains one passage of a long text.
+    func explain(_ state: PassageState, of session: LookupSession, with config: BackendConfig? = nil) {
+        // A passage's Translation counts once the whole reply has been read.
+        guard !state.isExplaining, session.status != .translating, state.status == .done, state.hasWords, let engine else { return }
+        if let config { session.explanationBackend = config }
+        let chosen = session.explanationBackend ?? session.backend
+        let backend = backend(for: settings.latest(of: chosen))
+        let isLearn = session.direction == .learn
+        let chinese = isLearn ? state.passage.text : state.translation ?? state.passage.text
+        let english = isLearn ? state.translation : state.passage.text
+        state.isExplaining = true
+        state.explanation = ""
+        state.explanationError = nil
+        session.tasks.append(Task {
+            defer { state.isExplaining = false; state.isThinking = false }
+            do {
+                let thinking: ThinkingHandler = { await MainActor.run { state.isThinking = true } }
+                for try await delta in engine.explain(chinese, translation: english, backend: backend, thinking: thinking) {
+                    state.isThinking = false
+                    state.explanation += delta
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                state.explanationError = error.localizedDescription
+            }
+        })
+    }
+
     /// Explains the text, or for a text too long for the Backend, its next part.
     func explain(_ session: LookupSession, with config: BackendConfig? = nil) {
         // Explain uses the Translation as a reference, so it waits for it.
-        guard !session.isExplaining, session.status != .translating, session.status != .readingImage, let engine else { return }
+        // There must be Chinese to explain: a History entry may still be being read.
+        guard !session.isExplaining, session.status != .translating, session.status != .readingImage,
+              session.analysis?.hasChinese == true, let engine else { return }
         if let config { session.explanationBackend = config }
         // The Backend this Lookup used (its current settings if it still exists), never a silent
         // switch to another one: a Local Lookup's text must stay on this Mac.
         let chosen = session.explanationBackend ?? session.backend
-        let backend = backend(for: settings.backend(id: chosen.id) ?? chosen)
+        let backend = backend(for: settings.latest(of: chosen))
         session.isExplaining = true
         session.explanationError = nil
         let translation = session.direction == .learn ? session.translation : session.sourceText
@@ -847,14 +1083,19 @@ final class AppModel {
     // MARK: Learning
 
     private func countEncounters(in analysis: OfflineAnalysis) {
-        let saved = Set(workspace.vocabulary().map(\.simplified))
+        let saved = workspace.vocabularyWords()
         let seen = Set(analysis.words.map(\.text)).intersection(saved)
         if !seen.isEmpty { history.recordEncounters(seen) }
     }
 
-    func isSaved(_ word: String) -> Bool {
+    /// The Vocabulary's words.
+    var savedWords: Set<String> {
         _ = workspaceRevision
-        return workspace.vocabulary().contains { $0.simplified == word }
+        return workspace.vocabularyWords()
+    }
+
+    func isSaved(_ word: String) -> Bool {
+        savedWords.contains(word)
     }
 
     func toggleSaved(_ segment: Segment, sentence: String) {

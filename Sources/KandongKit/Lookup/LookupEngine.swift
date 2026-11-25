@@ -86,12 +86,74 @@ public struct LookupProgress: Equatable, Sendable {
     /// The Translation so far, including the part still coming in.
     public var translation: String
 
+    public init(completedParts: Int, totalParts: Int?, translation: String) {
+        self.completedParts = completedParts
+        self.totalParts = totalParts
+        self.translation = translation
+    }
+
     public var isInParts: Bool { totalParts != 1 }
 }
 
 public typealias ProgressHandler = @Sendable (LookupProgress) async -> Void
 /// Hears that the model is thinking before it answers.
 public typealias ThinkingHandler = @Sendable () async -> Void
+
+/// Spaces out the reports of a reply coming in: each one reads the whole reply again and redraws the
+/// panel, and a fast Backend sends hundreds a second.
+struct Pace {
+    static let interval = Duration.milliseconds(80)
+    private var last: ContinuousClock.Instant?
+
+    mutating func isDue(now: ContinuousClock.Instant = .now) -> Bool {
+        if let last, now - last < Self.interval { return false }
+        last = now
+        return true
+    }
+}
+
+/// Which passages of a reply coming in aren't known to be finished.
+struct PassageWriting {
+    /// The replies' object of passages, and every passage asked for.
+    let object: String
+    let keys: Set<String>
+    private(set) var unfinished: Set<String> = []
+    private var seen: [String: String] = [:]
+
+    init(object: String, keys: Set<String>) {
+        self.object = object
+        self.keys = keys
+    }
+
+    /// Whether a reply so far may be complete JSON, as Apple's always are. Those list their keys in any
+    /// order, so what's being written shows only in what changes, and every one has to be looked at.
+    static func mayBeComplete(_ reply: String) -> Bool {
+        reply.reversed().first { !$0.isWhitespace } == "}"
+    }
+
+    /// Once seen unfinished, the reply is JSON coming in as it's written, which says itself which of
+    /// its strings are.
+    private var isRaw = false
+
+    mutating func update(_ values: [(key: String, value: String, isComplete: Bool)], reply: String) {
+        defer { seen = Dictionary(values.map { ($0.key, $0.value) }, uniquingKeysWith: { first, _ in first }) }
+        guard !reply.isEmpty else { return }
+        var root: JSONValue?
+        if !isRaw, Self.mayBeComplete(reply) { root = try? Prompts.decode(JSONValue.self, from: reply) }
+        guard case .object(let parts)? = root else {
+            isRaw = true
+            unfinished = Set(values.filter { !$0.isComplete }.map(\.key))
+            return
+        }
+        // The passages come first, so anything after them (a note, readings) means they're all written.
+        if keys.isSubset(of: values.map(\.key)), parts.keys.contains(where: { $0 != object }) {
+            unfinished = []
+            return
+        }
+        let changed = values.filter { seen[$0.key] != $0.value }.map(\.key)
+        if !changed.isEmpty { unfinished = Set(changed) }
+    }
+}
 
 /// The steps of a Lookup that don't involve the UI.
 public struct LookupEngine: Sendable {
@@ -105,7 +167,8 @@ public struct LookupEngine: Sendable {
 
     /// Instant, dictionary-only Reading and Word breakdown.
     public func offline(_ text: String) -> OfflineAnalysis {
-        analyzer.analyze(text)
+        let passages = Passage.split(text)
+        return passages.isEmpty ? analyzer.analyze(text) : analyzer.analyze(passages, source: text)
     }
 
     /// Asks the Backend for the Translation and reading corrections, and applies the corrections.
@@ -182,6 +245,7 @@ public struct LookupEngine: Sendable {
     public func contextReadings(_ analysis: OfflineAnalysis, english: String, backend: AIBackend) async throws -> OfflineAnalysis {
         guard let request = Prompts.readings(of: analysis, english: english, mode: backend.readingMode),
               await backend.fits(request) != false else { return analysis }
+        try Task.checkCancellation()
         let reply: LearnReply
         do {
             reply = try Prompts.parseReadings(try await backend.complete(request))
@@ -191,6 +255,270 @@ public struct LookupEngine: Sendable {
         // Only the kind of answer the mode asks for, as in `learn`.
         return backend.readingMode == .choose ? applyReadings(reply.readings, to: analysis) : applyCorrections(reply.readingCorrections, to: analysis)
     }
+
+    // MARK: Passages
+
+    /// Translates a long text's passages (those in `wanted`), keeping whatever could be translated.
+    /// `analysis` comes back with the readings a Free Backend corrected; a Choose one is asked for them
+    /// afterwards (`contextReadings(_:translations:backend:)`): asked for both at once, small models
+    /// copy long Chinese instead of translating it, and take several times as long.
+    public func learnPassages(
+        _ analysis: OfflineAnalysis, wanted: [Passage], backend: AIBackend, progress: PassageHandler? = nil, thinking: ThinkingHandler? = nil
+    ) async throws -> (replies: PassageReplies, analysis: OfflineAnalysis) {
+        let all = analysis.passages.map(\.passage)
+        let context = workspace.context()
+        let replies = try await translated(
+            wanted, of: all, direction: .learn, backend: backend, steps: steps(askForReadings: backend.readingMode == .free, context: context),
+            request: { batch, preceding, step in
+                var request = Prompts.learn(
+                    passages: batch, count: all.count, analysis: analysis, context: step.context(context),
+                    terms: workspace.matchingTerms(in: batch.map(\.text).joined(separator: "\n")),
+                    askForCorrections: step.askForReadings, preceding: preceding
+                )
+                request.onThinking = thinking
+                return request
+            },
+            isGood: { text, passage in !Self.isUntranslated(english: text, source: passage.text) },
+            alone: { passage in
+                // Too long for this Backend even by itself: its sentences, in parts.
+                try await learn(analyzer.analyze(passage.text), backend: backend, thinking: thinking).translation
+            },
+            progress: progress
+        )
+        return (replies, backend.readingMode == .free ? applyCorrections(replies.corrections, to: analysis) : analysis)
+    }
+
+    /// Asks a Choose Backend how a long text's words read in context, a few passages at a time, once
+    /// they're translated. `progress` gets the analysis after each request, and the passages it has
+    /// read; a failure keeps the dictionary's readings for the rest.
+    public func contextReadings(
+        _ analysis: OfflineAnalysis, translations: [Int: String], backend: AIBackend, progress: @Sendable (OfflineAnalysis, _ read: Set<Int>) async -> Void
+    ) async throws {
+        guard backend.readingMode == .choose else { return }
+        var result = analysis
+        let passages = analysis.passages.filter { translations[$0.id] != nil }
+        for start in stride(from: 0, to: passages.count, by: Self.smallBatch) {
+            try Task.checkCancellation()
+            let batch = passages[start..<min(start + Self.smallBatch, passages.count)]
+            let part = OfflineAnalysis(source: batch.map(\.passage.text).joined(separator: "\n"), segments: batch.flatMap { analysis.segments[$0.segments] })
+            let english = batch.compactMap { translations[$0.id] }.joined(separator: "\n")
+            guard let request = Prompts.readings(of: part, english: english, mode: .choose), await backend.fits(request) != false else { continue }
+            // Stopped while measuring: nothing more is sent.
+            try Task.checkCancellation()
+            let reply = try Prompts.parseReadings(try await backend.complete(request))
+            result = applyReadings(reply.readings, to: result)
+            await progress(result, Set(batch.map(\.id)))
+        }
+    }
+
+    /// Says a long English text's passages in Chinese, keeping whatever could be translated.
+    public func reversePassages(
+        _ wanted: [Passage], of all: [Passage], backend: AIBackend, progress: PassageHandler? = nil, thinking: ThinkingHandler? = nil
+    ) async throws -> PassageReplies {
+        let context = workspace.context()
+        return try await translated(
+            wanted, of: all, direction: .reverse, backend: backend, steps: steps(askForReadings: false, context: context),
+            request: { batch, preceding, step in
+                var request = Prompts.reverse(
+                    passages: batch, count: all.count, context: step.context(context),
+                    terms: workspace.matchingTerms(in: batch.map(\.text).joined(separator: "\n")), preceding: preceding
+                )
+                request.onThinking = thinking
+                return request
+            },
+            isGood: { text, _ in text.containsHan },
+            alone: { passage in try await reverse(passage.text, backend: backend, thinking: thinking).reply.chinese },
+            progress: progress
+        )
+    }
+
+    /// Whether a passage has anything to translate; the rest (a URL, say) is shown once, as it is.
+    public static func needsTranslation(_ passage: Passage, _ direction: Direction) -> Bool {
+        switch direction {
+        case .learn: passage.text.containsHan
+        case .reverse: needsTranslation(english: String(passage.text.map { $0.isHan ? " " : $0 }))
+        }
+    }
+
+    /// Passages asked about at a time when the Backend left them out, or how they read: small models
+    /// that can't do all of a long text manage a few.
+    static let smallBatch = 4
+
+    private func translated(
+        _ wanted: [Passage], of all: [Passage], direction: Direction, backend: AIBackend, steps: [PromptStep],
+        request: (_ batch: [Passage], _ preceding: String?, PromptStep) -> AIRequest,
+        isGood: (_ text: String, Passage) -> Bool,
+        alone: (Passage) async throws -> String,
+        progress: PassageHandler?
+    ) async throws -> PassageReplies {
+        var result = PassageReplies()
+        guard !wanted.isEmpty else { return result }
+
+        func preceding(_ batch: [Passage]) -> String? {
+            batch.first.flatMap { first in all.last { $0.id < first.id }?.text }
+        }
+
+        /// Sends one batch and keeps the passages it translated; throws what stopped it from finishing.
+        func ask(_ batch: [Passage], _ request: AIRequest) async throws {
+            // Cancelled while it was being measured: nothing is sent.
+            try Task.checkCancellation()
+            let byKey = Dictionary(uniqueKeysWithValues: batch.map { (Prompts.key(of: $0, count: all.count), $0) })
+            let object = Prompts.passagesKey(direction)
+            func clean(_ text: String) -> String {
+                text.replacingOccurrences(of: #"^\s*\[p\d+\]\s*"#, with: "", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            var reply = ""
+            var writing = PassageWriting(object: object, keys: Set(byKey.keys))
+            func look() -> [(key: String, value: String, isComplete: Bool)] {
+                let text = Prompts.visibleText(reply)
+                let values = PartialJSON.stringValues(inObject: object, in: text)
+                writing.update(values, reply: text)
+                return values
+            }
+            func show() async {
+                let values = look()
+                guard let progress else { return }
+                var shown = PassageProgress(texts: result.texts)
+                for value in values {
+                    guard let passage = byKey[value.key], !value.value.isEmpty else { continue }
+                    shown.texts[passage.id] = clean(value.value)
+                }
+                shown.current = writing.unfinished.compactMap { byKey[$0]?.id }.max()
+                await progress(shown)
+            }
+            func keep(_ texts: [String: String]) {
+                for (key, text) in texts {
+                    guard let passage = byKey[key] else { continue }
+                    let text = clean(text)
+                    if !text.isEmpty, isGood(text, passage) { result.texts[passage.id] = text }
+                }
+            }
+            do {
+                var pace = Pace()
+                for try await snapshot in backend.snapshots(of: request) {
+                    reply = snapshot
+                    if pace.isDue() {
+                        await show()
+                    } else if PassageWriting.mayBeComplete(reply) {
+                        _ = look()
+                    }
+                }
+                let parsed = try Prompts.parsePassages(reply, direction)
+                keep(parsed.texts)
+                result.corrections += parsed.corrections
+                if result.note.isEmpty { result.note = parsed.note }
+                await progress?(PassageProgress(texts: result.texts))
+            } catch {
+                // Cut off or malformed: the passages it did finish still count.
+                let values = look()
+                keep(Dictionary(values.filter { !writing.unfinished.contains($0.key) }.map { ($0.key, $0.value) }, uniquingKeysWith: { first, _ in first }))
+                await progress?(PassageProgress(texts: result.texts))
+                throw error
+            }
+        }
+
+        /// Sends a batch that may be too big, in halves if it is.
+        func send(_ batch: [Passage], _ step: PromptStep) async throws {
+            try Task.checkCancellation()
+            let prompt = request(batch, preceding(batch), step)
+            do {
+                if await backend.fits(prompt) == false { throw BackendError.contextTooLong }
+                try await ask(batch, prompt)
+            } catch BackendError.contextTooLong {
+                let left = batch.filter { result.texts[$0.id] == nil }
+                guard left.count > 1 else {
+                    for passage in left {
+                        let text = try await alone(passage)
+                        if !text.isEmpty { result.texts[passage.id] = text }
+                    }
+                    await progress?(PassageProgress(texts: result.texts))
+                    return
+                }
+                for half in halves(left) { try await send(half, step) }
+            }
+        }
+
+        func halves(_ batch: [Passage]) -> [[Passage]] {
+            guard batch.count > 1 else { return [batch] }
+            let middle = Self.balancedMiddle(batch.map(\.text))
+            return [Array(batch[..<middle]), Array(batch[middle...])]
+        }
+
+        do {
+            // Whole if it fits, else without the optional parts of the prompt, else in batches.
+            var step = steps[steps.count - 1]
+            var inBatches = true
+            trying: for candidate in steps {
+                let whole = request(wanted, preceding(wanted), candidate)
+                if await backend.fits(whole) == false { continue }
+                do {
+                    try await ask(wanted, whole)
+                } catch BackendError.contextTooLong {
+                    continue
+                } catch let error where Self.canAskAgain(error) {
+                    result.error = error
+                }
+                step = candidate
+                inBatches = false
+                break trying
+            }
+            if inBatches {
+                // A Backend that can't measure has just turned it all away: halves, halved until they fit.
+                let measures = await backend.fits(request(Array(wanted.prefix(1)), nil, step)) != nil
+                let parts = measures ? await packed(wanted, fits: { await backend.fits(request($0, preceding($0), step)) ?? true }) : halves(wanted)
+                for part in parts {
+                    do {
+                        try await send(part, step)
+                    } catch let error where Self.canAskAgain(error) {
+                        result.error = error
+                    }
+                }
+            }
+            // Once more for the ones it left out, copied or cut short, a few at a time.
+            let missing = wanted.filter { result.texts[$0.id] == nil }
+            if !missing.isEmpty { result.error = nil }
+            for start in stride(from: 0, to: missing.count, by: Self.smallBatch) {
+                do {
+                    try await send(Array(missing[start..<min(start + Self.smallBatch, missing.count)]), steps[steps.count - 1])
+                } catch let error where Self.canAskAgain(error) {
+                    result.error = error
+                }
+            }
+        } catch {
+            if error is CancellationError || Task.isCancelled { throw error }
+            result.error = error
+        }
+        if wanted.allSatisfy({ result.texts[$0.id] != nil }) { result.error = nil }
+        return result
+    }
+
+    /// Whether the Backend may manage the rest after this: it answered, if badly. One that can't be
+    /// reached, or turned the request away, isn't asked again.
+    static func canAskAgain(_ error: Error) -> Bool {
+        switch error as? BackendError {
+        case .badResponse?, .untranslated?, .refused?, .cutOff?, .repeating?, .contextTooLong?: true
+        default: false
+        }
+    }
+
+    /// The largest consecutive batches that fit.
+    private func packed(_ passages: [Passage], fits: ([Passage]) async -> Bool) async -> [[Passage]] {
+        var remaining = passages[...]
+        var batches: [[Passage]] = []
+        while !remaining.isEmpty {
+            var low = 1, high = remaining.count + 1
+            while high - low > 1 {
+                let middle = (low + high) / 2
+                if await fits(Array(remaining.prefix(middle))) { low = middle } else { high = middle }
+            }
+            batches.append(Array(remaining.prefix(low)))
+            remaining = remaining.dropFirst(low)
+        }
+        return batches
+    }
+
+    // MARK: Explain
 
     public func explain(_ text: String, translation: String?, backend: AIBackend, thinking: ThinkingHandler? = nil) -> AsyncThrowingStream<String, Error> {
         var request = explainRequest(text, translation: translation)
@@ -254,17 +582,24 @@ public struct LookupEngine: Sendable {
 
         // Sends one request, reporting the reply's `streamField` as it comes in.
         func ask(_ request: AIRequest, part: String) async throws -> Reply {
+            // Cancelled while it was being measured: nothing is sent.
+            try Task.checkCancellation()
             var request = request
             request.onThinking = thinking
             var reply = ""
             var shown: String?
-            for try await snapshot in backend.snapshots(of: request) {
-                reply = snapshot
+            func show() async {
                 guard let field = request.streamField,
-                      let partial = PartialJSON.stringValue(of: field, in: Prompts.visibleText(snapshot)), partial != shown else { continue }
+                      let partial = PartialJSON.stringValue(of: field, in: Prompts.visibleText(reply)), partial != shown else { return }
                 shown = partial
                 await progress(done, total, partial)
             }
+            var pace = Pace()
+            for try await snapshot in backend.snapshots(of: request) {
+                reply = snapshot
+                if pace.isDue() { await show() }
+            }
+            await show()
             return try parse(reply, part)
         }
 

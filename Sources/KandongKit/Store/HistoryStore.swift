@@ -10,6 +10,8 @@ public struct HistoryEntry: Identifiable, Hashable, Sendable {
     public let text: String
     public let translation: String
     public let backend: String
+    /// A long text's Translation by passage, in order ("" where there was none); empty otherwise.
+    public let passages: [String]
 }
 
 /// History of Lookups and Encounter counts, in SQLite under Application Support
@@ -46,6 +48,11 @@ public final class HistoryStore: @unchecked Sendable {
                 last_seen REAL NOT NULL
             );
             """)
+        // Added after the first release.
+        let columns = query("PRAGMA table_info(lookups)", []) { Self.string($0, 1) }
+        if !columns.contains("passages") {
+            try execute("ALTER TABLE lookups ADD COLUMN passages TEXT NOT NULL DEFAULT ''")
+        }
     }
 
     /// An in-memory store, for tests and as a fallback.
@@ -71,13 +78,17 @@ public final class HistoryStore: @unchecked Sendable {
         }
     }
 
-    public func setTranslation(id: Int64, translation: String, backend: String) {
-        locked { run("UPDATE lookups SET translation = ?, backend = ? WHERE id = ?", [.text(translation), .text(backend), .int(id)]) }
+    public func setTranslation(id: Int64, translation: String, backend: String, passages: [String] = []) {
+        let stored = passages.isEmpty ? "" : (try? JSONEncoder().encode(passages)).map { String(decoding: $0, as: UTF8.self) } ?? ""
+        locked {
+            run("UPDATE lookups SET translation = ?, backend = ?, passages = ? WHERE id = ?",
+                [.text(translation), .text(backend), .text(stored), .int(id)])
+        }
     }
 
     public func recent(limit: Int = 200, matching search: String = "") -> [HistoryEntry] {
         locked {
-            var sql = "SELECT id, created_at, source, direction, text, translation, backend FROM lookups"
+            var sql = "SELECT id, created_at, source, direction, text, translation, backend, passages FROM lookups"
             var params: [Value] = []
             if !search.isEmpty {
                 sql += " WHERE text LIKE ? OR translation LIKE ?"
@@ -93,7 +104,8 @@ public final class HistoryStore: @unchecked Sendable {
                     direction: Direction(rawValue: Self.string(row, 3)) ?? .learn,
                     text: Self.string(row, 4),
                     translation: Self.string(row, 5),
-                    backend: Self.string(row, 6)
+                    backend: Self.string(row, 6),
+                    passages: (try? JSONDecoder().decode([String].self, from: Data(Self.string(row, 7).utf8))) ?? []
                 )
             }
         }

@@ -17,6 +17,7 @@ enum PanelSnapshots {
             settings.backends = [.appleIntelligence, .chatGPT, lmStudio]
             settings.myLevel = scenario.myLevel
             settings.hasChosenLevel = scenario.myLevel != 0
+            settings.readingTypeface = scenario.typeface
             settings.hasAnsweredOpenAtLogin = !scenario.asksOpenAtLogin
             let workspace = FileManager.default.temporaryDirectory.appendingPathComponent("kandong-snapshot-\(UUID().uuidString)")
             let loginItem = LoginItem(preview: .off, errorMessage: scenario.loginItemError)
@@ -34,8 +35,8 @@ enum PanelSnapshots {
             scenario.fill(session, engine)
             model.session = session
             controller.selectedWordID = scenario.selectWord.flatMap { word in session.analysis?.words.first { $0.text == word }?.id }
-            for appearance in [NSAppearance.Name.aqua, .darkAqua] {
-                let dark = appearance == .darkAqua
+            for (suffix, appearance) in scenario.appearances {
+                let dark = suffix.hasPrefix("dark")
                 let view = ResultView(model: model, controller: controller)
                     .frame(width: 480, height: scenario.height)
                     .background { GlassStandIn(dark: dark) }
@@ -50,15 +51,25 @@ enum PanelSnapshots {
                 host.layoutSubtreeIfNeeded()
                 try? await Task.sleep(for: .milliseconds(300))
                 host.layoutSubtreeIfNeeded()
+                if scenario.scroll > 0, let scrollView = scrollView(in: host) {
+                    scrollView.contentView.scroll(to: NSPoint(x: 0, y: scenario.scroll))
+                    try? await Task.sleep(for: .milliseconds(200))
+                    host.layoutSubtreeIfNeeded()
+                }
                 guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { continue }
                 host.cacheDisplay(in: host.bounds, to: bitmap)
                 guard let png = bitmap.representation(using: .png, properties: [:]) else { continue }
-                let url = folder.appendingPathComponent("\(scenario.name)-\(dark ? "dark" : "light").png")
+                let url = folder.appendingPathComponent("\(scenario.name)-\(suffix).png")
                 try? png.write(to: url)
                 print(url.path)
             }
             try? FileManager.default.removeItem(at: workspace)
         }
+    }
+
+    private static func scrollView(in view: NSView) -> NSScrollView? {
+        if let scrollView = view as? NSScrollView { return scrollView }
+        return view.subviews.lazy.compactMap { scrollView(in: $0) }.first
     }
 
     private struct Scenario {
@@ -69,6 +80,10 @@ enum PanelSnapshots {
         var asksOpenAtLogin = false
         var loginItemError: String?
         var height: CGFloat = 640
+        /// Points scrolled down.
+        var scroll: CGFloat = 0
+        var typeface = ReadingTypeface.kai
+        var appearances: [(String, NSAppearance.Name)] = [("light", .aqua), ("dark", .darkAqua)]
         let fill: @MainActor (LookupSession, LookupEngine) -> Void
     }
 
@@ -79,7 +94,104 @@ enum PanelSnapshots {
         session.status = .done
     }
 
+    private static let article = [
+        ("新能源汽车今年的销量又创下了新的纪录。根据行业协会上周公布的数据，前十个月国内一共卖出了1280万辆，比去年同期增长了32%，其中纯电动车占了六成以上。",
+         "New-energy vehicle sales have set another record this year. According to figures the industry association released last week, 12.8 million were sold in China in the first ten months, up 32% on the same period last year, and more than 60% of them were fully electric."),
+        ("不过，价格战也让很多企业的日子越来越难过。BYD 在三月份率先降价，其他品牌只好跟着降，有些车型一个季度就便宜了4万块钱，利润几乎被压缩到了零。",
+         "But the price war is making life harder and harder for many companies. BYD was the first to cut prices in March, and the other brands had no choice but to follow. Some models got 40,000 yuan cheaper in a single quarter, squeezing profits to almost nothing."),
+        ("@老王 你上次说想换车，现在可能是个不错的 timing。我昨天去 Tesla 的店里 test drive 了一下，感觉还行，就是内饰太简单了。",
+         "@老王 You said you wanted to change cars, and now might be good timing. I went for a test drive at the Tesla store yesterday. It felt all right, but the interior is too plain."),
+        ("充电仍然是最大的问题。国庆节那几天，高速公路服务区里排队的车一眼望不到头，有人等了整整5个小时才充上电，最后干脆在车里睡了一觉。",
+         "Charging is still the biggest problem. Over the National Day holiday the queues at motorway services stretched out of sight. Some people waited five whole hours to charge and ended up just sleeping in their cars."),
+    ]
+
+    private static func readArticle(_ session: LookupSession, _ engine: LookupEngine, translated: Int = 4, current: Int? = nil) {
+        session.sourceText = article.map(\.0).joined(separator: "\n\n")
+        let analysis = engine.offline(session.sourceText)
+        session.split(into: analysis.passages.map(\.passage))
+        session.analysis = analysis
+        for (index, state) in session.passages.enumerated() where index < translated {
+            state.translation = article[index].1
+            state.status = .done
+        }
+        if let current {
+            session.passages[current].translation = String(article[current].1.prefix(60))
+            session.passages[current].status = .translating
+        }
+        session.translation = session.joinedTranslation
+        session.status = current == nil ? .done : .translating
+    }
+
+    /// Lines rather than paragraphs, some with nothing to translate.
+    private static let lines: [(String, String?)] = [
+        ("[Verse 1]", nil), ("窗外的雨，慢慢地下", "Rain outside the window, slowly falling"), ("我不想回家", "I don't want to go home"),
+        ("La-la, la-lu, lu-la", nil), ("Tu-tu-tu, tu, tu", nil), ("（喂？奶奶你吃饭了吗？）", "(Hello? Grandma, have you eaten?)"),
+        ("\n[Chorus]", nil), ("I left my window open for the rain", nil), ("And then the evening called me back again", nil),
+        ("这个 weekend 我们一起去看海", "Let's go and see the sea together this weekend"), ("带上你的 camera 和一点点勇气", "Bring your camera and a little courage"),
+        ("\n你慢慢走，我慢慢等，路边的花一朵一朵地开", "Walk slowly and I'll wait; the roadside flowers open one by one"),
+        ("风吹过来的时候，我们谁也没有说话，只是一直笑", "When the wind came, neither of us spoke, we just kept laughing"),
+        ("等到天黑了，路灯亮了，我才想起来要跟你说再见", "Only when it was dark and the street lamps lit did I remember to say goodbye"),
+        ("雨停了，月亮出来了，明天会是一个晴天", "The rain has stopped, the moon is out, tomorrow will be sunny"),
+    ]
+
     private static let scenarios: [Scenario] = [
+        Scenario(name: "long-lines", myLevel: 3, height: 900) { session, engine in
+            session.sourceText = lines.map(\.0).joined(separator: "\n")
+            let analysis = engine.offline(session.sourceText)
+            session.split(into: analysis.passages.map(\.passage))
+            session.analysis = analysis
+            for (state, line) in zip(session.passages, lines) { state.translation = line.1; state.status = .done }
+            session.translation = session.joinedTranslation
+            session.status = .done
+        },
+        Scenario(name: "long", myLevel: 3, height: 760) { session, engine in readArticle(session, engine) },
+        Scenario(name: "long-translating", myLevel: 3, selectWord: nil, height: 760) { session, engine in
+            readArticle(session, engine, translated: 1, current: 1)
+            session.translation = nil
+        },
+        Scenario(name: "long-word", myLevel: 3, selectWord: "内饰", height: 760) { session, engine in readArticle(session, engine) },
+        Scenario(name: "long-end", myLevel: 3, height: 760, scroll: 1500) { session, engine in readArticle(session, engine) },
+        Scenario(name: "long-explained", myLevel: 3, height: 760) { session, engine in
+            readArticle(session, engine)
+            session.passages[0].explanation = """
+            - **Structure**: 根据…的数据 gives the source first, then **比去年同期增长了** compares with the same period last year.
+            - **Words**: 创下…纪录 (chuàngxià … jìlù), "to set a record"; 占 (zhàn) here means "to make up" a share: 占了六成.
+            - **Register**: neutral, news-like.
+            """
+        },
+        Scenario(name: "long-failed", myLevel: 3, height: 760, scroll: 1300) { session, engine in
+            readArticle(session, engine, translated: 2)
+            for state in session.passages.dropFirst(2) { state.status = .missing }
+            session.status = .failed("LM Studio isn't reachable at http://localhost:1234/v1. Is the server running?")
+        },
+        Scenario(name: "long-pingfang", myLevel: 3, height: 760, typeface: .system,
+                 appearances: [("light-contrast", .accessibilityHighContrastAqua), ("dark-contrast", .accessibilityHighContrastDarkAqua)]) { session, engine in
+            readArticle(session, engine)
+        },
+        Scenario(name: "long-reverse", myLevel: 3, height: 760) { session, engine in
+            let english = [
+                "I had a look at the numbers you sent over last night, and I think we should talk before the meeting on Thursday. The costs for the second quarter don't add up, and I'm worried that the client will notice before we have a good answer for them.",
+                "Could you ask @Lily to bring the latest version of the spreadsheet? The one in the shared folder is at least two weeks old, and nobody seems to know who changed the totals on the third page, so it would help to have her walk us through it.",
+            ]
+            let chinese = ["我看了一下你昨晚发来的数据，我觉得我们应该在周四开会之前先聊聊。第二季度的成本对不上，我担心客户会在我们想好怎么回答之前就发现。",
+                           "你能让 @Lily 把最新版的表格带来吗？共享文件夹里的那份至少是两周前的了，而且好像没人知道是谁改了第三页的总数，所以最好让她给我们讲一遍。"]
+            session.direction = .reverse
+            session.sourceText = english.joined(separator: "\n\n")
+            session.split(into: Passage.split(session.sourceText))
+            let passages = zip(session.passages, chinese).map { Passage(id: $0.id, text: $1, leading: $0.passage.leading) }
+            session.analysis = engine.analyzer.analyze(passages, source: chinese.joined(separator: "\n\n"))
+            for (state, text) in zip(session.passages, chinese) { state.translation = text; state.status = .done }
+            session.translation = session.joinedTranslation
+            session.note = "Neutral and polite; works with colleagues."
+            session.status = .done
+        },
+        Scenario(name: "explained", myLevel: 3, height: 560) { session, engine in
+            session.sourceText = "他还没还我钱。"
+            session.analysis = engine.offline(session.sourceText)
+            session.translation = "He still hasn't paid me back."
+            session.status = .done
+            session.explanation = "- **Grammar**: 还没 (hái méi) is \"still hasn't\"; the second **还** (huán) is \"to give back\".\n- **Words**: 还钱 (huán qián), to pay money back, e.g. 我明天还你钱。"
+        },
         Scenario(name: "learn-polyphone", selectWord: "还", height: 760) { session, engine in
             let text = "他还没还我钱，这一行的人都知道银行不会借给他。"
             session.sourceText = text

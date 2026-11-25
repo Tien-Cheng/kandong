@@ -37,6 +37,35 @@ public final class OfflineAnalyzer: Sendable {
         return OfflineAnalysis(source: source, segments: buildSegments(pieces))
     }
 
+    /// Long text, read passage by passage (and several at a time). A word's id says which passage it
+    /// is in, so passages can be analysed as they arrive and keep their words' ids.
+    public func analyze(_ passages: [Passage], source: String) -> OfflineAnalysis {
+        var parts = [[Segment]](repeating: [], count: passages.count)
+        parts.withUnsafeMutableBufferPointer { buffer in
+            nonisolated(unsafe) let buffer = buffer
+            DispatchQueue.concurrentPerform(iterations: passages.count) { index in
+                buffer[index] = analyze(passages[index].text).segments
+            }
+        }
+        var analysis = OfflineAnalysis(source: source, segments: [])
+        for (passage, segments) in zip(passages, parts) {
+            let start = analysis.segments.count
+            analysis.segments += segments.map { segment in
+                var segment = segment
+                segment.id = Self.id(of: segment.id, in: passage)
+                return segment
+            }
+            analysis.passages.append(AnalysedPassage(passage: passage, segments: start..<analysis.segments.count))
+        }
+        return analysis
+    }
+
+    /// The same for a passage whatever is analysed with it. Words past the ten thousandth (a Backend
+    /// may write a passage of any length) are numbered apart, so no two passages share an id.
+    private static func id(of position: Int, in passage: Passage) -> Int {
+        position < 10_000 ? passage.id * 10_000 + position : (passage.id + 1) * 1_000_000_000_000 + position
+    }
+
     // MARK: - Tokenizing
 
     private struct Token {

@@ -133,6 +133,14 @@ public struct AppSettings: Codable, Hashable, Sendable {
         return config
     }
 
+    /// The Backend a Lookup used, with its current settings, to ask it something more. A Backend that
+    /// kept the text on this Mac and has since been pointed elsewhere is used as it was: sending the
+    /// text to another machine is for the user to choose.
+    public func latest(of used: BackendConfig) -> BackendConfig {
+        guard let current = backend(id: used.id), current.isOnDevice || !used.isOnDevice else { return used }
+        return current
+    }
+
     /// The same settings with Default and Local pointing at Backends that exist (and a Local one on
     /// this Mac), so edits like changing a URL or removing a Backend can't leave them dangling.
     public func normalized() -> AppSettings {

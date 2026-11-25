@@ -13,7 +13,7 @@ private let evalEnabled = ProcessInfo.processInfo.environment["KANDONG_LIVE"] ==
 ///
 /// `KANDONG_EVAL_BACKEND` is `apple` (the default) or `lmstudio:<model id>` (LM Studio at localhost:1234);
 /// `KANDONG_EVAL_READINGS` is `free` (the default) or `choose`, the `ReadingMode` used for 多音字;
-/// `KANDONG_EVAL_TIMEOUT` caps each call (seconds, default 90).
+/// `KANDONG_EVAL_TIMEOUT` caps each call (seconds, default 90). `--filter KandongEval/longText` runs only long text.
 ///
 /// Apple Intelligence on macOS 27.0.1 (AFM 3 Core Advanced) fixed 1 多音字, missed 2–3 and turned 1–3 readings
 /// wrong (e.g. 还给 huán → hái) over two runs, which is why it doesn't correct readings by default.
@@ -268,6 +268,51 @@ struct KandongEval {
         }
     }
 
+    // MARK: Long text
+
+    /// A long text with something only its own Translation should carry in each passage, so passages
+    /// that were dropped, merged or shifted show up.
+    static let article: [Check] = [
+        Check(text: "新能源汽车今年的销量又创下了新的纪录。根据行业协会上周公布的数据，前十个月国内一共卖出了1280万辆，比去年同期增长了32%，其中纯电动车占了六成以上。", keep: ["32%"]),
+        Check(text: "不过，价格战也让很多企业的日子越来越难过。BYD 在三月份率先降价，其他品牌只好跟着降，有些车型一个季度就便宜了4万块钱，利润几乎被压缩到了零。", keep: ["BYD"]),
+        Check(text: "在这种情况下，海外市场就成了大家的救命稻草。去年出口到欧洲的电动车一共有67万辆，不少公司已经开始在匈牙利和泰国建厂，希望能绕过越来越高的关税。", anyOf: [["Hungary"], ["Thailand"]]),
+        Check(text: "@老王 你上次说想换车，现在可能是个不错的时机。我昨天去 Tesla 的店里试驾了一下，感觉还行，就是内饰太简单了，我老婆完全看不上。", keep: ["Tesla"], anyOf: [["wife"]]),
+        Check(text: "充电仍然是最大的问题。国庆节那几天，高速公路服务区里排队的车一眼望不到头，有人等了整整5个小时才充上电，最后干脆在车里睡了一觉。", anyOf: [["five", "5"]]),
+        Check(text: "专家认为，未来三年内电池的成本还会继续下降，固态电池也有望在2028年前后实现量产。到那个时候，续航一千公里可能会变成标准配置，而不是什么值得宣传的卖点了。", keep: ["2028"]),
+        Check(text: "当然，也有人不这么乐观。一位不愿透露姓名的工程师告诉记者，实验室里的数据和真正的量产之间还有很长的路要走，“至少还要8年”，他说。", anyOf: [["eight", "8"], ["engineer"]]),
+        Check(text: "总的来说，对普通消费者来讲，现在买车比以前划算多了，但要不要马上下手，还是得看自己的实际需要。", anyOf: [["consumer", "buyer"]]),
+    ]
+
+    /// Long text only, which takes a few requests rather than a hundred: `--filter KandongEval/longText`.
+    @Test func longText() async throws {
+        guard let backend = Self.backend(named: Self.backendName), let analyzer = TestData.analyzer else { return }
+        let engine = LookupEngine(analyzer: analyzer, workspace: Workspace(folder: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)))
+        let analysis = engine.offline(Self.article.map(\.text).joined(separator: "\n\n"))
+        let passages = analysis.passages.map(\.passage)
+        let counting = CountingBackend(base: backend)
+        let start = ContinuousClock.now
+        let (replies, corrected) = try await engine.learnPassages(analysis, wanted: passages, backend: counting)
+        let seconds = Double((ContinuousClock.now - start).components.seconds)
+        let requests = counting.requests
+        let latest = Latest(corrected)
+        do {
+            try await engine.contextReadings(corrected, translations: replies.texts, backend: counting) { analysis, _ in await latest.set(analysis) }
+        } catch { print("readings: \(error.localizedDescription)") }
+        let read = await latest.analysis
+        let readingSeconds = Double((ContinuousClock.now - start).components.seconds) - seconds
+        var lines = ["Kandong eval, long text — \(backend.label): \(passages.count) passages, \(replies.texts.count) translated, \(requests) requests, \(Self.format(seconds)); readings \(counting.requests - requests) requests, \(Self.format(readingSeconds))"]
+        var good = 0
+        for check in Self.article {
+            let text = passages.filter { check.text.contains($0.text) }.compactMap { replies.texts[$0.id] }.joined(separator: " ")
+            let problems = text.isEmpty ? ["nothing"] : Self.missing(check, in: text) + (Self.isUntranslated(text) ? ["untranslated"] : [])
+            if problems.isEmpty { good += 1 }
+            lines.append((problems.isEmpty ? "ok    " : "FAIL  \(problems.joined(separator: "; "))  ") + String(check.text.prefix(14)) + "… → " + text)
+        }
+        lines.insert("| Passages in place | \(good)/\(Self.article.count) |  error: \(replies.error?.localizedDescription ?? "none")  readings changed: \(read.words.filter(\.readingCorrected).map { "\($0.text) \($0.pinyin)" })", at: 1)
+        print(lines.joined(separator: "\n"))
+        #expect(!replies.texts.isEmpty)
+    }
+
     struct TimedOut: LocalizedError {
         var errorDescription: String? { "timed out after \(KandongEval.format(KandongEval.timeout))" }
     }
@@ -345,6 +390,33 @@ private struct CorrectingReadings: AIBackend {
     var readingMode: ReadingMode { ReadingMode(rawValue: ProcessInfo.processInfo.environment["KANDONG_EVAL_READINGS"] ?? "") ?? .free }
     func supportsImages() async -> Bool { await base.supportsImages() }
     func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> { base.respond(to: request) }
+}
+
+private actor Latest {
+    private(set) var analysis: OfflineAnalysis
+    init(_ analysis: OfflineAnalysis) { self.analysis = analysis }
+    func set(_ analysis: OfflineAnalysis) { self.analysis = analysis }
+}
+
+/// Counts the requests a Lookup took.
+private final class CountingBackend: AIBackend, @unchecked Sendable {
+    let base: AIBackend
+    private let lock = NSLock()
+    private var count = 0
+    init(base: AIBackend) { self.base = base }
+    var requests: Int { lock.withLock { count } }
+    var label: String { base.label }
+    var readingMode: ReadingMode { base.readingMode }
+    func supportsImages() async -> Bool { await base.supportsImages() }
+    func fits(_ request: AIRequest) async -> Bool? { await base.fits(request) }
+    func snapshots(of request: AIRequest) -> AsyncThrowingStream<String, Error> {
+        lock.withLock { count += 1 }
+        return base.snapshots(of: request)
+    }
+    func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> {
+        lock.withLock { count += 1 }
+        return base.respond(to: request)
+    }
 }
 
 /// The eval's scoring, checked offline.

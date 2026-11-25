@@ -59,6 +59,7 @@ public final class Workspace: @unchecked Sendable {
 
     private let lock = NSLock()
     private var cache: [URL: (modified: Date, text: String)] = [:]
+    private var wordsCache: (text: String, words: Set<String>)?
     private var watcher: DispatchSourceFileSystemObject?
 
     public init(folder: URL) {
@@ -126,6 +127,15 @@ public final class Workspace: @unchecked Sendable {
             item.addedAt = record["added_at"] ?? ""
             return item
         }
+    }
+
+    /// The Vocabulary's words, parsed only when the file has changed: the panel asks on every update.
+    public func vocabularyWords() -> Set<String> {
+        let text = read(vocabularyURL)
+        if let cached = lock.withLock({ wordsCache }), cached.text == text { return cached.words }
+        let words = Set(vocabulary().map(\.simplified))
+        lock.withLock { wordsCache = (text, words) }
+        return words
     }
 
     /// Terms whose Chinese (or, for English text, whose English) appears in `text`. Longest first.
