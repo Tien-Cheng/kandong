@@ -85,20 +85,20 @@ private final class FakeBackend: AIBackend, @unchecked Sendable {
     }
 }
 
-/// Sends its JSON reply a few characters at a time, slower than the panel is updated.
+/// Sends its JSON reply a few characters at a time, each piece written only once the one before has
+/// been taken and slower than the panel is updated, so a busy machine can't bunch them together.
 private struct TrickleBackend: AIBackend {
     let label = "Trickle"
     func supportsImages() async -> Bool { false }
-    func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> {
-        let reply = Array(#"{"translation": "Hello there"}"#)
-        return AsyncThrowingStream { continuation in
-            Task {
-                for start in stride(from: 0, to: reply.count, by: 5) {
-                    continuation.yield(String(reply[start..<min(start + 5, reply.count)]))
-                    try? await Task.sleep(for: Pace.interval + .milliseconds(10))
-                }
-                continuation.finish()
-            }
+    func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> { AsyncThrowingStream { $0.finish() } }
+    func snapshots(of request: AIRequest) -> AsyncThrowingStream<String, Error> {
+        let reply = #"{"translation": "Hello there"}"#
+        nonisolated(unsafe) var sent = 0
+        return AsyncThrowingStream {
+            guard sent < reply.count else { return nil }
+            try await Task.sleep(for: Pace.interval + .milliseconds(10))
+            sent = min(sent + 5, reply.count)
+            return String(reply.prefix(sent))
         }
     }
 }
