@@ -45,13 +45,13 @@ private let sentence = "今天天气很好，我们去公园散步。"   // 15 c
 
     @Test func rejoinsLinesAScreenshotWrapped() {
         // Wrapped every 20 characters, through words and sentences.
-        let text = String(repeating: "昨天我和朋友一起去了新开的图书馆看书然后喝了咖啡，", count: 6)
+        let text = String(repeating: "昨天我和朋友一起去了新开的图书馆。看完书以后我们喝了咖啡，", count: 6)
         let characters = Array(text)
         let wrapped = stride(from: 0, to: characters.count, by: 20).map { String(characters[$0..<min($0 + 20, characters.count)]) }.joined(separator: "\n")
         let paragraphs = Passage.paragraphs(wrapped)
         #expect(paragraphs.map(\.text) == [text])
-        #expect(Passage.paragraphs("this line of English was wrapped by the\nPDF it came from and it carries on over\nthree lines").map(\.text)
-            == ["this line of English was wrapped by the PDF it came from and it carries on over three lines"])
+        #expect(Passage.paragraphs("this line of English was wrapped by the\nPDF it came from. It also carries on over\nthree lines").map(\.text)
+            == ["this line of English was wrapped by the PDF it came from. It also carries on over three lines"])
     }
 
     @Test func keepsChatListsAndPoemsApart() {
@@ -64,6 +64,26 @@ private let sentence = "今天天气很好，我们去公园散步。"   // 15 c
         let sentences = "这一行本身就是一个完整的句子而且还挺长的。\n这一行也是一个完整的句子而且同样也挺长的。\n最后一行同样是一个完整的句子所以不应该合并。"
         #expect(Passage.paragraphs(sentences).count == 3)
         #expect(Passage.paragraphs("\u{3000}\u{3000}这一段开头有全角空格所以是一个新的段落的开始\n\u{3000}\u{3000}这一段开头也有全角空格所以又是一个新的段落\n\u{3000}\u{3000}最后这一段").count == 3)
+    }
+
+    @Test func keepsLyricsApart() {
+        // A short heading over lines of much the same length, and lines that each start with a capital.
+        let verse = "[Verse]\nI left my window open for the rain\nAnd then the evening called me back again"
+        #expect(Passage.paragraphs(verse).map(\.text) == verse.components(separatedBy: "\n"))
+        let lines = "The kettle hums a quiet little song\nThe neighbours seem to know it all along\nI water every plant before I go"
+        #expect(Passage.paragraphs(lines).count == 3)
+        let mixed = "我把窗户打开等着一场慢慢落下来的雨\n（慢慢来）\n你说过的话我都还记得清清楚楚明明白白"
+        #expect(Passage.paragraphs(mixed).count == 3)
+        // Lines as even as wrapped text, but each a clause of its own.
+        let even = "你慢慢走，我慢慢等，路边的花一朵一朵地开\n风吹过来的时候，我们谁也没有说话，只是一直笑\n等到天黑了，路灯亮了，我才想起来要跟你说再见"
+        #expect(Passage.paragraphs(even).count == 3)
+    }
+
+    @Test func tellsLinesFromParagraphsAndSections() {
+        let paragraph = String(repeating: sentence, count: 5)
+        let passages = Passage.split("今天，明天\n期待每一天\n\n" + paragraph + "\n" + paragraph)
+        #expect(passages.map(\.isLine) == [true, true, false, false])
+        #expect(passages.map(\.startsSection) == [false, false, true, false])
     }
 
     @Test func joiningKeepsParagraphs() {

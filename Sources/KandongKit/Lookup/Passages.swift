@@ -16,6 +16,10 @@ public struct Passage: Hashable, Codable, Sendable, Identifiable {
     }
 
     public var startsParagraph: Bool { id == 0 || leading.contains(where: \.isNewline) }
+    /// A blank line comes before it.
+    public var startsSection: Bool { leading.count(where: \.isNewline) > 1 }
+    /// About one line long, as in a chat, lyrics or a list, rather than a paragraph.
+    public var isLine: Bool { Self.weight(text) <= 30 }
 
     // MARK: Splitting
 
@@ -66,13 +70,16 @@ public struct Passage: Hashable, Codable, Sendable, Identifiable {
         var gap = ""
         func flush() {
             let widest = block.map(columns).max() ?? 0
-            // Short lines are a chat, a list or a poem; wrapped text fills its lines.
-            let isWrapped = block.count >= 3 && widest >= 30
+            // Wrapped text fills every line but a paragraph's last, and its sentences end wherever they
+            // fall, mid-line too. Otherwise the lines are the author's: a chat, a list, a poem, lyrics.
+            let fills: (String) -> Bool = { columns($0) * 4 >= widest * 3 }
+            let isWrapped = block.count >= 3 && widest >= 30 && block.dropLast().allSatisfy { fills($0) || endsSentence($0) }
+                && block.contains { TextChunker.sentences($0).count > 1 }
             var current = ""
             for (index, line) in block.enumerated() {
                 current += current.isEmpty ? line : separator(between: current, and: line) + line
                 let next = index + 1 < block.count ? block[index + 1] : nil
-                if let next, isWrapped, columns(line) * 4 >= widest * 3, !endsSentence(line), !startsItem(next) { continue }
+                if let next, isWrapped, fills(line), !endsSentence(line), !startsItem(next) { continue }
                 result.append((current, gap))
                 gap = "\n"
                 current = ""
@@ -104,9 +111,10 @@ public struct Passage: Hashable, Codable, Sendable, Identifiable {
         line.reversed().first { !closers.contains($0) }.map(sentenceEnds.contains) ?? false
     }
 
-    /// A list item, a chat line's @name, a heading's # or an indented paragraph.
+    /// A list item, a chat line's @name, a heading's # or an indented paragraph; or an English line with
+    /// a capital, which starts a verse more often than it carries a sentence on with a name.
     private static func startsItem(_ line: String) -> Bool {
-        line.range(of: #"^(\x{3000}|[-•*·>@#]|[（(]?[0-9一二三四五六七八九十]+[.、)）])"#, options: .regularExpression) != nil
+        line.range(of: #"^([A-Z][a-z’' ]|[(\[]|\x{3000}|[-•*·>@#]|[（(]?[0-9一二三四五六七八九十]+[.、)）])"#, options: .regularExpression) != nil
     }
 
     private static func separator(between line: String, and next: String) -> String {

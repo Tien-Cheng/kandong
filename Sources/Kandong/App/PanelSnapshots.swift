@@ -122,7 +122,28 @@ enum PanelSnapshots {
         session.status = current == nil ? .done : .translating
     }
 
+    /// Lines rather than paragraphs, some with nothing to translate.
+    private static let lines: [(String, String?)] = [
+        ("[Verse 1]", nil), ("窗外的雨，慢慢地下", "Rain outside the window, slowly falling"), ("我不想回家", "I don't want to go home"),
+        ("La-la, la-lu, lu-la", nil), ("Tu-tu-tu, tu, tu", nil), ("（喂？奶奶你吃饭了吗？）", "(Hello? Grandma, have you eaten?)"),
+        ("\n[Chorus]", nil), ("I left my window open for the rain", nil), ("And then the evening called me back again", nil),
+        ("这个 weekend 我们一起去看海", "Let's go and see the sea together this weekend"), ("带上你的 camera 和一点点勇气", "Bring your camera and a little courage"),
+        ("\n你慢慢走，我慢慢等，路边的花一朵一朵地开", "Walk slowly and I'll wait; the roadside flowers open one by one"),
+        ("风吹过来的时候，我们谁也没有说话，只是一直笑", "When the wind came, neither of us spoke, we just kept laughing"),
+        ("等到天黑了，路灯亮了，我才想起来要跟你说再见", "Only when it was dark and the street lamps lit did I remember to say goodbye"),
+        ("雨停了，月亮出来了，明天会是一个晴天", "The rain has stopped, the moon is out, tomorrow will be sunny"),
+    ]
+
     private static let scenarios: [Scenario] = [
+        Scenario(name: "long-lines", myLevel: 3, height: 900) { session, engine in
+            session.sourceText = lines.map(\.0).joined(separator: "\n")
+            let analysis = engine.offline(session.sourceText)
+            session.split(into: analysis.passages.map(\.passage))
+            session.analysis = analysis
+            for (state, line) in zip(session.passages, lines) { state.translation = line.1; state.status = .done }
+            session.translation = session.joinedTranslation
+            session.status = .done
+        },
         Scenario(name: "long", myLevel: 3, height: 760) { session, engine in readArticle(session, engine) },
         Scenario(name: "long-translating", myLevel: 3, selectWord: nil, height: 760) { session, engine in
             readArticle(session, engine, translated: 1, current: 1)

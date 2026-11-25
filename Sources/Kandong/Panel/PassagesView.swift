@@ -12,11 +12,23 @@ struct PassagesView: View {
         LazyVStack(alignment: .leading, spacing: 0) {
             ForEach(session.passages) { state in
                 PassageRow(model: model, controller: controller, session: session, state: state)
-                    // A cut inside a paragraph reads on; a new paragraph starts apart.
-                    .padding(.top, state.id == 0 ? 0 : state.passage.startsParagraph ? 26 : 14)
+                    .padding(.top, gap(above: state))
                     .id(state.id)
             }
         }
+    }
+
+    /// As the text has it: a blank line, or a new paragraph, starts apart; the lines of a chat or a
+    /// verse, and a cut inside a paragraph, read on.
+    private func gap(above state: PassageState) -> CGFloat {
+        guard state.id > 0, let previous = session.passage(state.id - 1) else { return 0 }
+        if state.passage.startsSection { return 24 }
+        if isPlain(state), isPlain(previous) { return 4 }
+        return state.passage.startsParagraph && !(state.passage.isLine && previous.passage.isLine) ? 24 : 14
+    }
+
+    private func isPlain(_ state: PassageState) -> Bool {
+        session.direction == .learn && !state.needsTranslation
     }
 }
 
@@ -28,7 +40,8 @@ private struct PassageRow: View {
 
     var body: some View {
         let isLearn = session.direction == .learn
-        VStack(alignment: .leading, spacing: 8) {
+        // The Reading's own descent already sets what follows it apart.
+        VStack(alignment: .leading, spacing: isLearn ? 4 : 8) {
             if !isLearn, !session.hidesSourcePassages, state.needsTranslation {
                 Text(state.passage.text)
                     .font(.title3)
@@ -50,7 +63,14 @@ private struct PassageRow: View {
 
     @ViewBuilder private var reading: some View {
         let settings = model.settings
-        if !state.segments.isEmpty {
+        if session.direction == .learn, !state.needsTranslation {
+            // No Chinese to match: the size of the Translations, in the grey of text that isn't one.
+            Text(state.passage.text)
+                .font(.title3)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else if !state.segments.isEmpty {
             let selected = controller.selectedWordID
             ReadingBlock(
                 content: ReadingContent(
@@ -121,7 +141,7 @@ private struct PassageExplanation: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
-        .padding(.top, 2)
+        .padding(.top, 6)
     }
 }
 
