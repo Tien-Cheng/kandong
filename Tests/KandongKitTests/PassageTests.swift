@@ -358,6 +358,12 @@ private actor Reports {
             #"{"passages": {"p01": "\#(Self.english)", "p02": "Half of"}}"#,
         ], apart: .milliseconds(5))
         #expect(fast.texts.keys.sorted() == [0])
+        // Raw JSON whose last brace never came: both passages had.
+        let unclosed = try await cutOff([
+            #"{"passages": {"p01": "\#(Self.english)", "p02": "Ha"#,
+            #"{"passages": {"p01": "\#(Self.english)", "p02": "\#(Self.english)"}"#,
+        ])
+        #expect(unclosed.texts.keys.sorted() == [0, 1])
         // The note comes after the passages, so they're all finished.
         let passages = Passage.split([String(repeating: "We went for a walk in the park. ", count: 6), String(repeating: "Then we went home. ", count: 14)].joined(separator: "\n\n"))
         #expect(passages.count == 2)
@@ -392,14 +398,17 @@ private actor Reports {
     private final class SlowToMeasure: AIBackend, @unchecked Sendable {
         let label = "Slow"
         let readingMode = ReadingMode.choose
+        /// Whether passages asked for by key are measured as too long.
+        let turnsAwayPassages: Bool
         private let lock = NSLock()
         private var count = 0
+        init(turnsAwayPassages: Bool = false) { self.turnsAwayPassages = turnsAwayPassages }
         var requests: Int { lock.withLock { count } }
         func supportsImages() async -> Bool { false }
         func fits(_ request: AIRequest) async -> Bool? {
             // Goes on measuring after it's cancelled, as a Backend may.
             await withCheckedContinuation { done in DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { done.resume() } }
-            return true
+            return !(turnsAwayPassages && request.user.contains("[p0"))
         }
         func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> {
             lock.withLock { count += 1 }
@@ -424,6 +433,16 @@ private actor Reports {
         tasks.forEach { $0.cancel() }
         for task in tasks { _ = await task.result }
         #expect(backend.requests == 0)
+        // Nor the ordinary request that a passage too long for this one falls back to.
+        for delay in [60, 260, 460, 660] {
+            let turnsAway = SlowToMeasure(turnsAwayPassages: true)
+            let task = Task { _ = try await engine.learnPassages(analysis, wanted: [wanted[0]], backend: turnsAway) }
+            try await Task.sleep(for: .milliseconds(delay))
+            let before = turnsAway.requests
+            task.cancel()
+            _ = await task.result
+            #expect(turnsAway.requests == before)
+        }
     }
 
     @Test func translatesOnlyWhatIsWanted() async throws {

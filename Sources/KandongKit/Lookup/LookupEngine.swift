@@ -125,23 +125,28 @@ struct PassageWriting {
         self.keys = keys
     }
 
-    /// Whether a reply so far is complete JSON, as Apple's are. Those list their keys in any order, so
-    /// what's being written shows only in what changes, and every one has to be looked at.
-    static func looksComplete(_ reply: String) -> Bool {
+    /// Whether a reply so far may be complete JSON, as Apple's always are. Those list their keys in any
+    /// order, so what's being written shows only in what changes, and every one has to be looked at.
+    static func mayBeComplete(_ reply: String) -> Bool {
         reply.reversed().first { !$0.isWhitespace } == "}"
     }
 
+    /// Once seen unfinished, the reply is JSON coming in as it's written, which says itself which of
+    /// its strings are.
+    private var isRaw = false
+
     mutating func update(_ values: [(key: String, value: String, isComplete: Bool)], reply: String) {
         defer { seen = Dictionary(values.map { ($0.key, $0.value) }, uniquingKeysWith: { first, _ in first }) }
-        // JSON still being written says so itself.
-        let halfWritten = Set(values.filter { !$0.isComplete }.map(\.key))
-        guard halfWritten.isEmpty, Self.looksComplete(reply) else {
-            unfinished = halfWritten
+        guard !reply.isEmpty else { return }
+        var root: JSONValue?
+        if !isRaw, Self.mayBeComplete(reply) { root = try? Prompts.decode(JSONValue.self, from: reply) }
+        guard case .object(let parts)? = root else {
+            isRaw = true
+            unfinished = Set(values.filter { !$0.isComplete }.map(\.key))
             return
         }
         // The passages come first, so anything after them (a note, readings) means they're all written.
-        if keys.isSubset(of: values.map(\.key)), case .object(let parts)? = try? Prompts.decode(JSONValue.self, from: reply),
-           parts.keys.contains(where: { $0 != object }) {
+        if keys.isSubset(of: values.map(\.key)), parts.keys.contains(where: { $0 != object }) {
             unfinished = []
             return
         }
@@ -355,6 +360,8 @@ public struct LookupEngine: Sendable {
 
         /// Sends one batch and keeps the passages it translated; throws what stopped it from finishing.
         func ask(_ batch: [Passage], _ request: AIRequest) async throws {
+            // Cancelled while it was being measured: nothing is sent.
+            try Task.checkCancellation()
             let byKey = Dictionary(uniqueKeysWithValues: batch.map { (Prompts.key(of: $0, count: all.count), $0) })
             let object = Prompts.passagesKey(direction)
             func clean(_ text: String) -> String {
@@ -393,7 +400,7 @@ public struct LookupEngine: Sendable {
                     reply = snapshot
                     if pace.isDue() {
                         await show()
-                    } else if PassageWriting.looksComplete(reply) {
+                    } else if PassageWriting.mayBeComplete(reply) {
                         _ = look()
                     }
                 }
@@ -417,7 +424,6 @@ public struct LookupEngine: Sendable {
             let prompt = request(batch, preceding(batch), step)
             do {
                 if await backend.fits(prompt) == false { throw BackendError.contextTooLong }
-                try Task.checkCancellation()
                 try await ask(batch, prompt)
             } catch BackendError.contextTooLong {
                 let left = batch.filter { result.texts[$0.id] == nil }
@@ -446,7 +452,6 @@ public struct LookupEngine: Sendable {
             trying: for candidate in steps {
                 let whole = request(wanted, preceding(wanted), candidate)
                 if await backend.fits(whole) == false { continue }
-                try Task.checkCancellation()
                 do {
                     try await ask(wanted, whole)
                 } catch BackendError.contextTooLong {
@@ -577,6 +582,8 @@ public struct LookupEngine: Sendable {
 
         // Sends one request, reporting the reply's `streamField` as it comes in.
         func ask(_ request: AIRequest, part: String) async throws -> Reply {
+            // Cancelled while it was being measured: nothing is sent.
+            try Task.checkCancellation()
             var request = request
             request.onThinking = thinking
             var reply = ""

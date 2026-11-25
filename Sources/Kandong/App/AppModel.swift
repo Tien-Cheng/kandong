@@ -1016,7 +1016,9 @@ final class AppModel {
     /// Explains the text, or for a text too long for the Backend, its next part.
     func explain(_ session: LookupSession, with config: BackendConfig? = nil) {
         // Explain uses the Translation as a reference, so it waits for it.
-        guard !session.isExplaining, session.status != .translating, session.status != .readingImage, let engine else { return }
+        // There must be Chinese to explain: a History entry may still be being read.
+        guard !session.isExplaining, session.status != .translating, session.status != .readingImage,
+              session.analysis?.hasChinese == true, let engine else { return }
         if let config { session.explanationBackend = config }
         // The Backend this Lookup used (its current settings if it still exists), never a silent
         // switch to another one: a Local Lookup's text must stay on this Mac.
