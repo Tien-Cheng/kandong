@@ -26,12 +26,10 @@ struct ResultView: View {
 private struct SessionView: View {
     let model: AppModel
     let controller: ResultPanelController
-    @Bindable var session: LookupSession
-    @ViewState private var showAllWords = false
+    let session: LookupSession
     @ViewState private var contentHeight: CGFloat = 0
     @ViewState private var viewportHeight: CGFloat = 0
 
-    private static let longTextThreshold = 1500
     /// Gap between the glass edge and the sheet; the sheet's corners stay concentric with the panel's.
     private static let inset: CGFloat = 6
 
@@ -56,13 +54,8 @@ private struct SessionView: View {
             }
             .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { viewportHeight = $0; fit() }
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                if let word = controller.selectedWord, let analysis = session.analysis {
-                    WordCard(model: model, controller: controller, word: word, sentence: analysis.source,
-                             typeface: model.settings.readingTypeface, showTraditional: session.showTraditional)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
+                SelectedWordCard(model: model, controller: controller, session: session)
             }
-            .animation(.snappy(duration: 0.22), value: controller.selectedWordID)
             .background(Sheet.background, in: RoundedRectangle(cornerRadius: ResultPanelController.cornerRadius - Self.inset))
             .clipShape(RoundedRectangle(cornerRadius: ResultPanelController.cornerRadius - Self.inset))
             .padding([.horizontal, .bottom], Self.inset)
@@ -73,8 +66,8 @@ private struct SessionView: View {
         controller.fit(contentHeight: contentHeight, viewportHeight: viewportHeight)
     }
 
-    // MARK: Content
-
+    // Each section is a view of its own, so a token of the Translation or a step to the next word
+    // updates only the section it changes.
     @ViewBuilder private var content: some View {
         if session.status == .readingImage {
             ProgressRow(text: "Reading the image…")
@@ -88,17 +81,42 @@ private struct SessionView: View {
         if let analysis = session.analysis, analysis.hasChinese {
             ReadingView(model: model, controller: controller, analysis: analysis, showTraditional: session.showTraditional)
         }
-        translationSection
+        TranslationSection(model: model, session: session)
         if session.analysis?.hasChinese == true, session.status != .readingImage {
-            actions
-            explanationSection
-            levelQuestion
-            openAtLoginQuestion
-            breakdownSection
+            ResultActions(model: model, session: session)
+            ExplanationSection(model: model, session: session)
+            LevelQuestion(model: model)
+            OpenAtLoginQuestion(model: model, session: session)
+            WordList(model: model, controller: controller, session: session)
         }
     }
+}
 
-    @ViewBuilder private var translationSection: some View {
+/// The word card, while a word is selected.
+private struct SelectedWordCard: View {
+    let model: AppModel
+    let controller: ResultPanelController
+    let session: LookupSession
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let word = controller.selectedWord, let analysis = session.analysis {
+                WordCard(model: model, controller: controller, word: word, sentence: analysis.source,
+                         typeface: model.settings.readingTypeface, showTraditional: session.showTraditional)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        // Only appearing and going away move; stepping to another word just shows it.
+        .animation(.snappy(duration: 0.22), value: controller.selectedWordID == nil)
+    }
+}
+
+/// The Translation as it comes in, or why there is none.
+private struct TranslationSection: View {
+    let model: AppModel
+    let session: LookupSession
+
+    var body: some View {
         switch session.status {
         case .translating:
             // The Translation types out as it comes in (Reverse's Chinese shows once it's read).
@@ -134,9 +152,14 @@ private struct SessionView: View {
         let of = progress.totalParts.map { " of \($0)" } ?? ""
         return "Long text — translating part \(progress.completedParts + 1)\(of)…"
     }
+}
 
-    /// Copy (Reverse's answer comes first), Explain, and saying it the other way.
-    @ViewBuilder private var actions: some View {
+/// Copy (Reverse's answer comes first) and Explain.
+private struct ResultActions: View {
+    let model: AppModel
+    let session: LookupSession
+
+    var body: some View {
         let canExplain = session.explanation.isEmpty && !session.isExplaining
         let answer = session.direction == .reverse ? session.translation : session.translation.flatMap { $0.isEmpty ? nil : $0 }
         if canExplain || answer != nil {
@@ -160,8 +183,14 @@ private struct SessionView: View {
             .controlSize(.regular)
         }
     }
+}
 
-    @ViewBuilder private var explanationSection: some View {
+/// The Explanation of the whole text.
+struct ExplanationSection: View {
+    let model: AppModel
+    let session: LookupSession
+
+    var body: some View {
         if session.explanation.isEmpty && !session.isExplaining {
             if let error = session.explanationError {
                 FailureCard(model: model, session: session, config: session.explanationBackend ?? session.backend, message: error)
@@ -194,9 +223,13 @@ private struct SessionView: View {
             }
         }
     }
+}
 
-    /// Asked once: which words to fold away as already known.
-    @ViewBuilder private var levelQuestion: some View {
+/// Asked once: which words to fold away as already known.
+struct LevelQuestion: View {
+    let model: AppModel
+
+    var body: some View {
         if model.settings.asksAboutLevel {
             QuestionCard {
                 Text("Fold away words you already know?").font(.callout.weight(.medium))
@@ -217,9 +250,14 @@ private struct SessionView: View {
             }
         }
     }
+}
 
-    /// Asked once: Kandong's shortcuts only work while it's open.
-    @ViewBuilder private var openAtLoginQuestion: some View {
+/// Asked once: Kandong's shortcuts only work while it's open.
+struct OpenAtLoginQuestion: View {
+    let model: AppModel
+    let session: LookupSession
+
+    var body: some View {
         if model.asksAboutOpenAtLogin(in: session) {
             QuestionCard {
                 Text("Open Kandong when you log in?").font(.callout.weight(.medium))
@@ -234,43 +272,6 @@ private struct SessionView: View {
                     Text(error).font(.caption).foregroundStyle(Sheet.corrected).textSelection(.enabled)
                 }
                 Text("You can change this in Settings → General.").font(.caption).foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    @ViewBuilder private var breakdownSection: some View {
-        if let analysis = session.analysis {
-            let words = analysis.uniqueWords
-            let known = words.filter(model.isKnown)
-            let unknown = words.filter { !model.isKnown($0) }
-            let isLong = session.sourceText.count > Self.longTextThreshold
-            let shown = isLong && !showAllWords ? Array(unknown.prefix(40)) : unknown
-            let saved = model.savedWords
-            VStack(alignment: .leading, spacing: 2) {
-                if !unknown.isEmpty {
-                    SectionTitle(known.isEmpty ? "Words" : "New words")
-                        .padding(.bottom, 4)
-                }
-                ForEach(shown) { word in
-                    WordRow(controller: controller, word: word, isSaved: saved.contains(word.text), typeface: model.settings.readingTypeface)
-                }
-                if shown.count < unknown.count {
-                    Button("Show all \(unknown.count) words") { showAllWords = true }
-                        .controlSize(.small)
-                        .padding(.top, 4)
-                }
-                if !known.isEmpty {
-                    DisclosureGroup {
-                        ForEach(known) { word in
-                            WordRow(controller: controller, word: word, isSaved: saved.contains(word.text), typeface: model.settings.readingTypeface)
-                        }
-                    } label: {
-                        Text("\(known.count) known word\(known.count == 1 ? "" : "s") (up to \(HSKTable.label(for: model.settings.myLevel)))")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.top, 6)
-                }
             }
         }
     }

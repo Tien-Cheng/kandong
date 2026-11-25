@@ -19,7 +19,18 @@ final class LookupSession: Identifiable {
     /// The text the user looked up (for Reverse, the English).
     var sourceText = ""
     /// The Chinese being studied: the source text for Learn, the AI's Chinese for Reverse.
-    var analysis: OfflineAnalysis?
+    var analysis: OfflineAnalysis? {
+        didSet {
+            words = analysis?.words ?? []
+            uniqueWords = analysis?.uniqueWords ?? []
+            positions = Dictionary(words.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
+        }
+    }
+    /// The Reading's words, in order, and the Word breakdown's, kept from `analysis`.
+    private(set) var words: [Segment] = []
+    private(set) var uniqueWords: [Segment] = []
+    /// Where each word is in `words`, by Segment id.
+    @ObservationIgnored private(set) var positions: [Int: Int] = [:]
     var translation: String?
     /// Register remark for Reverse Lookups.
     var note: String?

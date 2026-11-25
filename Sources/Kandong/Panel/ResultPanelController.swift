@@ -172,21 +172,17 @@ final class ResultPanelController: NSObject, NSWindowDelegate {
 
     // MARK: Keyboard
 
-    /// The words ←/→ walk through: each word of the Reading, in order.
-    private var navigableWords: [Segment] {
-        model.session?.analysis?.words ?? []
-    }
-
     var selectedWord: Segment? {
-        guard let id = selectedWordID else { return nil }
-        return navigableWords.first { $0.id == id }
+        guard let id = selectedWordID, let session = model.session, let position = session.positions[id] else { return nil }
+        return session.words[position]
     }
 
+    /// ←/→ walk through each word of the Reading, in order.
     func selectWord(step: Int) {
-        let words = navigableWords
-        guard !words.isEmpty else { return }
-        if let id = selectedWordID, let index = words.firstIndex(where: { $0.id == id }) {
-            selectedWordID = words[min(max(index + step, 0), words.count - 1)].id
+        guard let session = model.session, !session.words.isEmpty else { return }
+        let words = session.words
+        if let position = selectedWordID.flatMap({ session.positions[$0] }) {
+            selectedWordID = words[min(max(position + step, 0), words.count - 1)].id
         } else {
             selectedWordID = step < 0 ? words.last?.id : words.first?.id
         }

@@ -1,18 +1,74 @@
 import SwiftUI
 import KandongKit
 
-/// One word of the breakdown; click to show it in the word card.
-struct WordRow: View {
+/// The Word breakdown: new words, then (folded) the ones at or below My level.
+struct WordList: View {
+    let model: AppModel
     let controller: ResultPanelController
-    let word: Segment
-    let isSaved: Bool
-    let typeface: ReadingTypeface
+    let session: LookupSession
+    @ViewState private var showAllWords = false
+
+    private static let longTextThreshold = 1500
 
     var body: some View {
-        let isSelected = controller.selectedWordID == word.id
-        Button {
-            controller.selectedWordID = isSelected ? nil : word.id
-        } label: {
+        let words = session.uniqueWords
+        let known = words.filter(model.isKnown)
+        let unknown = words.filter { !model.isKnown($0) }
+        let isLong = session.sourceText.count > Self.longTextThreshold
+        let shown = isLong && !showAllWords ? Array(unknown.prefix(40)) : unknown
+        VStack(alignment: .leading, spacing: 2) {
+            if !unknown.isEmpty {
+                SectionTitle(known.isEmpty ? "Words" : "New words")
+                    .padding(.bottom, 4)
+            }
+            rows(shown)
+            if shown.count < unknown.count {
+                Button("Show all \(unknown.count) words") { showAllWords = true }
+                    .controlSize(.small)
+                    .padding(.top, 4)
+            }
+            if !known.isEmpty {
+                DisclosureGroup {
+                    rows(known)
+                } label: {
+                    Text("\(known.count) known word\(known.count == 1 ? "" : "s") (up to \(HSKTable.label(for: model.settings.myLevel)))")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.top, 6)
+            }
+        }
+    }
+
+    private func rows(_ words: [Segment]) -> some View {
+        let saved = model.savedWords
+        let selected = controller.selectedWordID
+        let typeface = model.settings.readingTypeface
+        return LazyVStack(alignment: .leading, spacing: 2) {
+            ForEach(words) { word in
+                WordRow(word: word, isSelected: word.id == selected, isSaved: saved.contains(word.text), typeface: typeface) {
+                    controller.select(word)
+                }
+                .equatable()
+            }
+        }
+    }
+}
+
+/// One word of the breakdown; click to show it in the word card.
+private struct WordRow: View, @MainActor Equatable {
+    let word: Segment
+    let isSelected: Bool
+    let isSaved: Bool
+    let typeface: ReadingTypeface
+    let select: () -> Void
+
+    static func == (a: WordRow, b: WordRow) -> Bool {
+        a.word == b.word && a.isSelected == b.isSelected && a.isSaved == b.isSaved && a.typeface == b.typeface
+    }
+
+    var body: some View {
+        Button(action: select) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(word.text).font(ReadingFont.font(size: 19, typeface: typeface))

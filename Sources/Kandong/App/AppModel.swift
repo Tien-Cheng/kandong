@@ -677,10 +677,19 @@ final class AppModel {
         session.direction = entry.direction
         session.historyID = entry.id
         session.isReopened = true
-        session.analysis = engine.offline(entry.direction == .learn ? entry.text : entry.translation)
         session.translation = entry.translation
         session.status = .done
         panel.show(near: nil)
+        session.tasks.append(Task {
+            let analysis = await Self.analyse(entry.direction == .learn ? entry.text : entry.translation, with: engine)
+            guard !Task.isCancelled, self.session === session else { return }
+            session.analysis = analysis
+        })
+    }
+
+    /// The dictionary's Reading, off the main thread: a long text takes a tenth of a second or more.
+    private static func analyse(_ text: String, with engine: LookupEngine) async -> OfflineAnalysis {
+        await Task.detached(priority: .userInitiated) { engine.offline(text) }.value
     }
 
     /// Looks the same thing up again with another Backend, once; settings stay as they are.
@@ -717,7 +726,8 @@ final class AppModel {
                 return
             }
             if session.direction == .learn {
-                let analysis = engine.offline(text)
+                let analysis = await Self.analyse(text, with: engine)
+                guard !Task.isCancelled, self.session === session else { return }
                 session.analysis = analysis
                 countEncounters(in: analysis)
                 do {

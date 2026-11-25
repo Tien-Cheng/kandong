@@ -86,12 +86,31 @@ public struct LookupProgress: Equatable, Sendable {
     /// The Translation so far, including the part still coming in.
     public var translation: String
 
+    public init(completedParts: Int, totalParts: Int?, translation: String) {
+        self.completedParts = completedParts
+        self.totalParts = totalParts
+        self.translation = translation
+    }
+
     public var isInParts: Bool { totalParts != 1 }
 }
 
 public typealias ProgressHandler = @Sendable (LookupProgress) async -> Void
 /// Hears that the model is thinking before it answers.
 public typealias ThinkingHandler = @Sendable () async -> Void
+
+/// Spaces out the reports of a reply coming in: each one reads the whole reply again and redraws the
+/// panel, and a fast Backend sends hundreds a second.
+struct Pace {
+    static let interval = Duration.milliseconds(80)
+    private var last: ContinuousClock.Instant?
+
+    mutating func isDue(now: ContinuousClock.Instant = .now) -> Bool {
+        if let last, now - last < Self.interval { return false }
+        last = now
+        return true
+    }
+}
 
 /// The steps of a Lookup that don't involve the UI.
 public struct LookupEngine: Sendable {
@@ -258,13 +277,18 @@ public struct LookupEngine: Sendable {
             request.onThinking = thinking
             var reply = ""
             var shown: String?
-            for try await snapshot in backend.snapshots(of: request) {
-                reply = snapshot
+            func show() async {
                 guard let field = request.streamField,
-                      let partial = PartialJSON.stringValue(of: field, in: Prompts.visibleText(snapshot)), partial != shown else { continue }
+                      let partial = PartialJSON.stringValue(of: field, in: Prompts.visibleText(reply)), partial != shown else { return }
                 shown = partial
                 await progress(done, total, partial)
             }
+            var pace = Pace()
+            for try await snapshot in backend.snapshots(of: request) {
+                reply = snapshot
+                if pace.isDue() { await show() }
+            }
+            await show()
             return try parse(reply, part)
         }
 
