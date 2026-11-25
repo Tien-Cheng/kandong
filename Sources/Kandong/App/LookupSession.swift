@@ -55,7 +55,7 @@ final class LookupSession: Identifiable {
             words = analysis?.words ?? []
             uniqueWords = analysis?.uniqueWords ?? []
             for analysed in analysis?.passages ?? [] {
-                guard let state = passages.first(where: { $0.id == analysed.id }), let segments = analysis?.segments(of: analysed),
+                guard let state = passage(analysed.id), let segments = analysis?.segments(of: analysed),
                       state.segments != segments else { continue }
                 state.segments = segments
             }
@@ -120,7 +120,7 @@ final class LookupSession: Identifiable {
 
     var isLong: Bool { !passages.isEmpty }
 
-    func passage(_ id: Int) -> PassageState? { passages.first { $0.id == id } }
+    func passage(_ id: Int) -> PassageState? { passages.indices.contains(id) ? passages[id] : nil }
 
     /// The passage a word is in, by Segment id.
     func passage(containing wordID: Int) -> PassageState? {
@@ -142,6 +142,11 @@ final class LookupSession: Identifiable {
     }
 
     @ObservationIgnored var tasks: [Task<Void, Never>] = []
+    /// Asking how a long text reads in context. Stopped when more of it is translated: it would write
+    /// its readings over the new passages.
+    @ObservationIgnored var readingTask: Task<Void, Never>?
+    /// Passages already read in context.
+    @ObservationIgnored var readInContext: Set<Int> = []
 
     init(source: LookupSource) {
         self.source = source
@@ -158,6 +163,7 @@ final class LookupSession: Identifiable {
     }
 
     func cancel() {
+        readingTask?.cancel()
         tasks.forEach { $0.cancel() }
         tasks = []
     }

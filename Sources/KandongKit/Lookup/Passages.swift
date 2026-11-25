@@ -125,11 +125,12 @@ public struct Passage: Hashable, Codable, Sendable, Identifiable {
     /// A paragraph cut at sentence ends near the target; sentences that are too long at clauses.
     static func pieces(_ paragraph: String) -> [String] {
         guard weight(paragraph) > limit else { return [paragraph] }
-        var units = TextChunker.sentences(paragraph)
-        while let long = units.firstIndex(where: { weight($0) > limit }) {
-            let smaller = TextChunker.smaller(units[long])
-            guard smaller.count > 1 else { break }
-            units.replaceSubrange(long...long, with: smaller)
+        // Each unit is looked at once; what can't be cut (a long URL) stays whole.
+        var units: [String] = []
+        var remaining = Array(TextChunker.sentences(paragraph).reversed())
+        while let unit = remaining.popLast() {
+            let smaller = weight(unit) > limit ? TextChunker.smaller(unit) : []
+            if smaller.count > 1 { remaining.append(contentsOf: smaller.reversed()) } else { units.append(unit) }
         }
         var pieces: [String] = []
         for unit in units {

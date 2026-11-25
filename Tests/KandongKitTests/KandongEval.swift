@@ -296,7 +296,7 @@ struct KandongEval {
         let requests = counting.requests
         let latest = Latest(corrected)
         do {
-            try await engine.contextReadings(corrected, translations: replies.texts, backend: counting) { await latest.set($0) }
+            try await engine.contextReadings(corrected, translations: replies.texts, backend: counting) { analysis, _ in await latest.set(analysis) }
         } catch { print("readings: \(error.localizedDescription)") }
         let read = await latest.analysis
         let readingSeconds = Double((ContinuousClock.now - start).components.seconds) - seconds

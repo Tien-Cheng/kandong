@@ -112,6 +112,26 @@ struct Pace {
     }
 }
 
+/// Which passages of a reply coming in aren't known to be finished.
+struct PassageWriting {
+    private(set) var unfinished: Set<String> = []
+    private var seen: [String: String] = [:]
+
+    mutating func update(_ values: [(key: String, value: String, isComplete: Bool)], reply: String) {
+        defer { seen = Dictionary(values.map { ($0.key, $0.value) }, uniquingKeysWith: { first, _ in first }) }
+        // JSON still being written says so itself.
+        let halfWritten = Set(values.filter { !$0.isComplete }.map(\.key))
+        guard halfWritten.isEmpty, reply.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("}") else {
+            unfinished = halfWritten
+            return
+        }
+        // Apple's replies so far are complete JSON, with keys in any order: what's being written is
+        // what changed last.
+        let changed = values.filter { seen[$0.key] != $0.value }.map(\.key)
+        if !changed.isEmpty { unfinished = Set(changed) }
+    }
+}
+
 /// The steps of a Lookup that don't involve the UI.
 public struct LookupEngine: Sendable {
     public let analyzer: OfflineAnalyzer
@@ -245,10 +265,10 @@ public struct LookupEngine: Sendable {
     }
 
     /// Asks a Choose Backend how a long text's words read in context, a few passages at a time, once
-    /// they're translated. `progress` gets the analysis after each request; a failure keeps the
-    /// dictionary's readings for the rest.
+    /// they're translated. `progress` gets the analysis after each request, and the passages it has
+    /// read; a failure keeps the dictionary's readings for the rest.
     public func contextReadings(
-        _ analysis: OfflineAnalysis, translations: [Int: String], backend: AIBackend, progress: @Sendable (OfflineAnalysis) async -> Void
+        _ analysis: OfflineAnalysis, translations: [Int: String], backend: AIBackend, progress: @Sendable (OfflineAnalysis, _ read: Set<Int>) async -> Void
     ) async throws {
         guard backend.readingMode == .choose else { return }
         var result = analysis
@@ -261,7 +281,7 @@ public struct LookupEngine: Sendable {
             guard let request = Prompts.readings(of: part, english: english, mode: .choose), await backend.fits(request) != false else { continue }
             let reply = try Prompts.parseReadings(try await backend.complete(request))
             result = applyReadings(reply.readings, to: result)
-            await progress(result)
+            await progress(result, Set(batch.map(\.id)))
         }
     }
 
@@ -306,6 +326,7 @@ public struct LookupEngine: Sendable {
         progress: PassageHandler?
     ) async throws -> PassageReplies {
         var result = PassageReplies()
+        guard !wanted.isEmpty else { return result }
 
         func preceding(_ batch: [Passage]) -> String? {
             batch.first.flatMap { first in all.last { $0.id < first.id }?.text }
@@ -320,15 +341,17 @@ public struct LookupEngine: Sendable {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
             }
             var reply = ""
+            var writing = PassageWriting()
             func show() async {
+                let values = PartialJSON.stringValues(inObject: object, in: Prompts.visibleText(reply))
+                writing.update(values, reply: reply)
                 guard let progress else { return }
                 var shown = PassageProgress(texts: result.texts)
-                for value in PartialJSON.stringValues(inObject: object, in: Prompts.visibleText(reply)) {
+                for value in values {
                     guard let passage = byKey[value.key], !value.value.isEmpty else { continue }
                     shown.texts[passage.id] = clean(value.value)
-                    // They're written in order, but not always listed in it.
-                    shown.current = max(shown.current ?? 0, passage.id)
                 }
+                shown.current = writing.unfinished.compactMap { byKey[$0]?.id }.max()
                 await progress(shown)
             }
             func keep(_ texts: [String: String]) {
@@ -350,10 +373,10 @@ public struct LookupEngine: Sendable {
                 if result.note.isEmpty { result.note = parsed.note }
                 await progress?(PassageProgress(texts: result.texts))
             } catch {
-                // Cut off or malformed: the passages it did finish still count, all but the last it wrote.
+                // Cut off or malformed: the passages it did finish still count.
                 let values = PartialJSON.stringValues(inObject: object, in: Prompts.visibleText(reply))
-                let last = values.map(\.key).max()
-                keep(Dictionary(values.filter { $0.isComplete && $0.key != last }.map { ($0.key, $0.value) }, uniquingKeysWith: { first, _ in first }))
+                writing.update(values, reply: reply)
+                keep(Dictionary(values.filter { !writing.unfinished.contains($0.key) }.map { ($0.key, $0.value) }, uniquingKeysWith: { first, _ in first }))
                 await progress?(PassageProgress(texts: result.texts))
                 throw error
             }

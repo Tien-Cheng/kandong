@@ -44,17 +44,20 @@ public final class OfflineAnalyzer: Sendable {
         parts.withUnsafeMutableBufferPointer { buffer in
             nonisolated(unsafe) let buffer = buffer
             DispatchQueue.concurrentPerform(iterations: passages.count) { index in
-                buffer[index] = analyze(passages[index].text).segments.map { segment in
-                    var segment = segment
-                    segment.id += passages[index].id * 10_000
-                    return segment
-                }
+                buffer[index] = analyze(passages[index].text).segments
             }
         }
+        // Room for every passage's words; only a passage of absurd length needs more.
+        var stride = 10_000
+        while let longest = parts.map(\.count).max(), longest > stride { stride *= 10 }
         var analysis = OfflineAnalysis(source: source, segments: [])
         for (passage, segments) in zip(passages, parts) {
             let start = analysis.segments.count
-            analysis.segments += segments
+            analysis.segments += segments.map { segment in
+                var segment = segment
+                segment.id += passage.id * stride
+                return segment
+            }
             analysis.passages.append(AnalysedPassage(passage: passage, segments: start..<analysis.segments.count))
         }
         return analysis

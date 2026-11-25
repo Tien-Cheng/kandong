@@ -38,6 +38,26 @@ private let sentence = "今天天气很好，我们去公园散步。"   // 15 c
         #expect(Passage.split(String(repeating: "字", count: 900)).allSatisfy { Passage.weight($0.text) <= Passage.limit })
     }
 
+    @Test func somethingThatCantBeCutDoesntStopTheRest() {
+        let url = "https://example.com/" + String(repeating: "a", count: 400)
+        let passages = Passage.split(url + "。" + String(repeating: "我们去公园散步，", count: 250) + "\n\n你好。")
+        #expect(passages.count > 10)
+        #expect(passages.filter { !$0.text.hasPrefix("https") }.allSatisfy { Passage.weight($0.text) <= Passage.limit })
+    }
+
+    @Test func splittingTakesTimeInProportion() {
+        func seconds(_ sentences: Int) -> Double {
+            let text = String(repeating: String(repeating: "字", count: 150) + "。", count: sentences)
+            let start = ContinuousClock.now
+            #expect(Passage.split(text).count > sentences / 2)
+            let elapsed = ContinuousClock.now - start
+            return Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+        }
+        _ = seconds(50)
+        // Four times the text; quadratic work would take sixteen times as long.
+        #expect(seconds(800) < seconds(200) * 10)
+    }
+
     @Test func aShortTailStaysWithItsParagraph() {
         let passages = Passage.split(String(repeating: sentence, count: 10) + "好。")
         #expect(passages.isEmpty || passages.allSatisfy { Passage.weight($0.text) >= 30 })
@@ -271,6 +291,74 @@ private actor Reports {
         #expect(backend.requests.contains { $0.user.contains("Preceding text") })
     }
 
+    @Test func nothingToTranslateAsksNothing() async throws {
+        let line = "https://example.com/" + String(repeating: "a", count: 160)
+        let passages = Passage.split(line + "\n" + line)
+        #expect(passages.count == 2)
+        #expect(passages.allSatisfy { !LookupEngine.needsTranslation($0, .reverse) })
+        let backend = PassageBackend()
+        let replies = try await engine().reversePassages([], of: passages, backend: backend)
+        #expect(replies.texts.isEmpty && replies.error == nil && backend.requests.isEmpty)
+    }
+
+    /// Sends the given replies so far, then is cut off; unreachable after that.
+    private final class CutOff: AIBackend, @unchecked Sendable {
+        let label = "Cut off"
+        let readingMode = ReadingMode.off
+        let soFar: [String]
+        private let lock = NSLock()
+        private var asked = false
+        init(_ soFar: [String]) { self.soFar = soFar }
+        func supportsImages() async -> Bool { false }
+        func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> { AsyncThrowingStream { $0.finish() } }
+        func snapshots(of request: AIRequest) -> AsyncThrowingStream<String, Error> {
+            let first = lock.withLock { defer { asked = true }; return !asked }
+            return AsyncThrowingStream { continuation in
+                guard first else { return continuation.finish(throwing: BackendError.serverUnavailable(name: "", url: "", hint: "")) }
+                Task {
+                    for reply in soFar {
+                        continuation.yield(reply)
+                        try? await Task.sleep(for: Pace.interval + .milliseconds(20))
+                    }
+                    continuation.finish(throwing: BackendError.cutOff(name: "Cut off"))
+                }
+            }
+        }
+    }
+
+    private static let english = String(repeating: "word ", count: 40)
+
+    @Test func neverKeepsAHalfWrittenPassage() async throws {
+        // Raw JSON, in an order of its own: p02 is finished, p01 isn't.
+        let raw = try await cutOff([#"{"passages": {"p02": "\#(Self.english)", "p01": "\#(Self.english)"#])
+        #expect(raw.texts.keys.sorted() == [1])
+        // Apple's replies so far are complete JSON, with keys in any order: the one that changed last is
+        // the one being written.
+        let apple = try await cutOff([
+            #"{"passages": {"p01": "\#(Self.english)"}}"#,
+            #"{"passages": {"p02": "\#(Self.english)", "p01": "\#(Self.english)"}}"#,
+            #"{"passages": {"p02": "\#(Self.english) more", "p01": "\#(Self.english)"}}"#,
+        ])
+        #expect(apple.texts.keys.sorted() == [0])
+        // With only one look at it, there's no telling, so neither counts.
+        let once = try await cutOff([#"{"passages": {"p02": "\#(Self.english)", "p01": "\#(Self.english)"}}"#])
+        #expect(once.texts.isEmpty)
+    }
+
+    private func cutOff(_ soFar: [String]) async throws -> PassageReplies {
+        let engine = try engine()
+        let analysis = engine.offline(Self.text)
+        return try await engine.learnPassages(analysis, wanted: analysis.passages.map(\.passage), backend: CutOff(soFar), progress: { _ in }).replies
+    }
+
+    @Test func wordIDsAreUniqueHoweverLongAPassage() throws {
+        let long = Passage(id: 0, text: String(repeating: "字，", count: 5_100), leading: "")
+        let analysis = try engine().analyzer.analyze([long, Passage(id: 1, text: "你好。", leading: "\n")], source: "")
+        #expect(Set(analysis.segments.map(\.id)).count == analysis.segments.count)
+        let word = try #require(analysis.segments(of: analysis.passages[1]).first)
+        #expect(analysis.passage(containing: word.id)?.id == 1)
+    }
+
     @Test func translatesOnlyWhatIsWanted() async throws {
         let engine = try engine()
         let analysis = engine.offline(Self.text)
@@ -343,13 +431,13 @@ private actor Reports {
         let steps = Steps()
         // The last one wasn't translated, so it isn't asked about.
         let translations = Dictionary(uniqueKeysWithValues: (0..<5).map { ($0, "English") })
-        try await engine.contextReadings(analysis, translations: translations, backend: LastReading()) { await steps.add($0) }
+        try await engine.contextReadings(analysis, translations: translations, backend: LastReading()) { analysis, _ in await steps.add(analysis) }
         #expect(await steps.all.count == 2)
         let words = try #require(await steps.all.last).words.filter { $0.text == "还" }
         #expect(words.map(\.readingCorrected) == [true, true, true, true, true, false])
         #expect(words.first?.pinyin == analysis.words.first { $0.text == "还" }?.alternativeReadings.last)
         // Other modes don't ask.
-        try await engine.contextReadings(analysis, translations: translations, backend: PassageBackend()) { _ in Issue.record("asked") }
+        try await engine.contextReadings(analysis, translations: translations, backend: PassageBackend()) { _, _ in Issue.record("asked") }
     }
 
     @Test func readsEachOccurrenceOnItsOwn() throws {

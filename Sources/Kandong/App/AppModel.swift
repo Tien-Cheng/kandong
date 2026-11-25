@@ -681,7 +681,8 @@ final class AppModel {
         session.status = .done
         panel.show(near: nil)
         session.tasks.append(Task {
-            let passages = Passage.split(entry.text)
+            let passages = await Self.split(entry.text)
+            guard !Task.isCancelled, self.session === session else { return }
             // Passages read the way they were translated; an older entry's Translation is shown whole.
             let kept = !passages.isEmpty && passages.count == entry.passages.count
             if !passages.isEmpty, kept || entry.direction == .learn { session.split(into: passages) }
@@ -707,6 +708,10 @@ final class AppModel {
                 session.analysis = analysis
             }
         })
+    }
+
+    private static func split(_ text: String) async -> [Passage] {
+        await Task.detached(priority: .userInitiated) { Passage.split(text) }.value
     }
 
     /// Reverse: the passages' Chinese so far, as passages of their own.
@@ -759,7 +764,8 @@ final class AppModel {
                 session.status = .failed(dictionaryError ?? "Dictionary not loaded.")
                 return
             }
-            let passages = session.direction == .reverse ? Passage.split(text) : []
+            let passages = session.direction == .reverse ? await Self.split(text) : []
+            guard !Task.isCancelled, self.session === session else { return }
             if !passages.isEmpty {
                 session.split(into: passages)
                 await translatePassages(session.untranslated, of: session, engine: engine, backend: backend, config: config)
@@ -839,7 +845,7 @@ final class AppModel {
         _ wanted: [PassageState], of session: LookupSession, engine: LookupEngine, backend: AIBackend, config: BackendConfig
     ) async {
         let all = session.passages.map(\.passage)
-        let alreadyTranslated = Set(session.passages.filter { $0.status == .done && $0.translation != nil }.map(\.id))
+        session.readingTask?.cancel()
         wanted.forEach { $0.status = .waiting }
         session.status = .translating
         let progress: PassageHandler = { progress in
@@ -897,8 +903,7 @@ final class AppModel {
                session.passages.allSatisfy({ !$0.isExplained }) {
                 explain(first, of: session)
             }
-            let fresh = replies.texts.filter { !alreadyTranslated.contains($0.key) }
-            await readInContext(session, translations: fresh, engine: engine, backend: backend)
+            session.readingTask = Task { await readInContext(session, engine: engine, backend: backend) }
         } catch {
             guard !Task.isCancelled else { return }
             session.isThinking = false
@@ -930,20 +935,27 @@ final class AppModel {
         session.analysis = analysis
     }
 
-    /// The dictionary's readings stand until the Backend says how the words read in context.
-    private func readInContext(_ session: LookupSession, translations: [Int: String], engine: LookupEngine, backend: AIBackend) async {
+    /// The dictionary's readings stand until the Backend says how the words read in context. Runs in
+    /// `session.readingTask`; once that's cancelled, nothing more is written.
+    private func readInContext(_ session: LookupSession, engine: LookupEngine, backend: AIBackend) async {
         guard let analysis = session.analysis else { return }
         do {
             if session.direction == .reverse {
+                // The whole of it: its Chinese was read again, from the dictionary, as passages came in.
                 let corrected = try await engine.contextReadings(analysis, english: session.sourceText, backend: backend)
                 guard !Task.isCancelled, self.session === session else { return }
                 session.analysis = corrected
-            } else {
-                try await engine.contextReadings(analysis, translations: translations, backend: backend) { corrected in
-                    await MainActor.run {
-                        guard self.session === session, !Task.isCancelled else { return }
-                        session.analysis = corrected
-                    }
+                return
+            }
+            var translations: [Int: String] = [:]
+            for state in session.passages where state.status == .done && !session.readInContext.contains(state.id) {
+                translations[state.id] = state.translation
+            }
+            try await engine.contextReadings(analysis, translations: translations, backend: backend) { corrected, read in
+                await MainActor.run {
+                    guard self.session === session, !Task.isCancelled else { return }
+                    session.analysis = corrected
+                    session.readInContext.formUnion(read)
                 }
             }
         } catch {
@@ -958,7 +970,7 @@ final class AppModel {
         let wanted = passage.map { [$0] } ?? session.untranslated
         guard !wanted.isEmpty else { return }
         // The Backend this Lookup used unless the user picked another, never a silent switch.
-        let chosen = config ?? settings.backend(id: session.backendID) ?? session.backend
+        let chosen = config ?? settings.latest(of: session.backend)
         let backend = backend(for: chosen)
         session.backend = chosen
         session.backendLabel = backend.label
@@ -972,10 +984,11 @@ final class AppModel {
 
     /// Explains one passage of a long text.
     func explain(_ state: PassageState, of session: LookupSession, with config: BackendConfig? = nil) {
-        guard !state.isExplaining, state.status == .done, state.hasWords, let engine else { return }
+        // A passage's Translation counts once the whole reply has been read.
+        guard !state.isExplaining, session.status != .translating, state.status == .done, state.hasWords, let engine else { return }
         if let config { session.explanationBackend = config }
         let chosen = session.explanationBackend ?? session.backend
-        let backend = backend(for: settings.backend(id: chosen.id) ?? chosen)
+        let backend = backend(for: settings.latest(of: chosen))
         let isLearn = session.direction == .learn
         let chinese = isLearn ? state.passage.text : state.translation ?? state.passage.text
         let english = isLearn ? state.translation : state.passage.text
@@ -1005,7 +1018,7 @@ final class AppModel {
         // The Backend this Lookup used (its current settings if it still exists), never a silent
         // switch to another one: a Local Lookup's text must stay on this Mac.
         let chosen = session.explanationBackend ?? session.backend
-        let backend = backend(for: settings.backend(id: chosen.id) ?? chosen)
+        let backend = backend(for: settings.latest(of: chosen))
         session.isExplaining = true
         session.explanationError = nil
         let translation = session.direction == .learn ? session.translation : session.sourceText
