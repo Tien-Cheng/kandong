@@ -9,6 +9,7 @@ struct WordCard: View {
     let sentence: String
     let typeface: ReadingTypeface
     let showTraditional: Bool
+    var isLong = false
     @ViewState private var addingTerm = false
 
     var body: some View {
@@ -61,7 +62,7 @@ struct WordCard: View {
                     TermEditor(model: model, word: word) { addingTerm = false }
                 }
                 Spacer()
-                Text("← → words")
+                Text(isLong ? "← → words  ↑ ↓ passages" : "← → words")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .accessibilityHidden(true)

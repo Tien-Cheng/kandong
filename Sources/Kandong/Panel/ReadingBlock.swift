@@ -19,7 +19,7 @@ struct ReadingContent: Equatable {
 protocol ReadingBlockActions: AnyObject {
     func select(_ segment: Segment)
     /// The menu for a word, or (nil) for the text around it.
-    func menu(for segment: Segment?) -> [ReadingMenuItem]
+    func menu(for segment: Segment?, in passage: Int?) -> [ReadingMenuItem]
     func register(_ view: ReadingBlockView)
 }
 
@@ -33,6 +33,8 @@ enum ReadingMenuItem {
 struct ReadingBlock: NSViewRepresentable {
     let content: ReadingContent
     let selectedID: Int?
+    /// The passage it shows, if the text is shown in passages.
+    let passage: Int?
     let actions: ReadingBlockActions
 
     func makeNSView(context: Context) -> ReadingBlockView {
@@ -43,6 +45,7 @@ struct ReadingBlock: NSViewRepresentable {
 
     func updateNSView(_ view: ReadingBlockView, context: Context) {
         view.actions = actions
+        view.passage = passage
         view.content = content
         view.selectedID = selectedID
     }
@@ -55,6 +58,7 @@ struct ReadingBlock: NSViewRepresentable {
 
 final class ReadingBlockView: NSView, NSViewToolTipOwner {
     weak var actions: ReadingBlockActions?
+    var passage: Int?
 
     var content = ReadingContent(segments: [], style: .short, typeface: .kai) {
         didSet {
@@ -110,6 +114,48 @@ final class ReadingBlockView: NSView, NSViewToolTipOwner {
 
     func contains(word id: Int) -> Bool {
         content.segments.contains { $0.id == id && $0.isWord }
+    }
+
+    /// Scrolls a word into sight, with a little of the text around it.
+    func reveal(word id: Int, animated: Bool) {
+        guard let frame = frame(ofWord: id), let scrollView = enclosingScrollView, let document = scrollView.documentView else { return }
+        let clip = scrollView.contentView
+        let word = convert(frame, to: document).insetBy(dx: 0, dy: -24)
+        // What's behind the word card or the action bar isn't in sight.
+        let insets = clip.contentInsets
+        let top = clip.bounds.minY + insets.top, bottom = clip.bounds.maxY - insets.bottom
+        var y = clip.bounds.minY
+        if word.minY < top { y -= top - word.minY } else if word.maxY > bottom { y += word.maxY - bottom }
+        let highest = max(-insets.top, document.frame.height - clip.bounds.height + insets.bottom)
+        y = min(max(y, -insets.top), highest)
+        guard abs(y - clip.bounds.minY) > 0.5 else { return }
+        let target = NSPoint(x: clip.bounds.minX, y: y)
+        if animated {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.18
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                clip.animator().setBoundsOrigin(target)
+            }
+        } else {
+            clip.scroll(to: target)
+        }
+        scrollView.reflectScrolledClipView(clip)
+    }
+
+    /// Whether all of a word can be seen.
+    func shows(word id: Int) -> Bool {
+        guard let frame = frame(ofWord: id), let clip = enclosingScrollView?.contentView else { return false }
+        let word = convert(frame, to: clip)
+        return word.minY >= clip.bounds.minY + clip.contentInsets.top && word.maxY <= clip.bounds.maxY - clip.contentInsets.bottom
+    }
+
+    /// How far down the visible part of the panel it starts; nil when none of it can be seen.
+    var visibleTop: CGFloat? {
+        guard window != nil, let scrollView = enclosingScrollView else { return nil }
+        let clip = scrollView.contentView
+        let frame = convert(bounds, to: clip)
+        let visible = clip.bounds.maxY - clip.contentInsets.bottom
+        return frame.maxY > clip.bounds.minY + 20 && frame.minY < visible - 20 ? frame.minY : nil
     }
 
     override func setFrameSize(_ newSize: NSSize) {
@@ -209,7 +255,7 @@ final class ReadingBlockView: NSView, NSViewToolTipOwner {
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
-        guard let items = actions?.menu(for: segment(at: event)), !items.isEmpty else { return nil }
+        guard let items = actions?.menu(for: segment(at: event), in: passage), !items.isEmpty else { return nil }
         let menu = NSMenu()
         for item in items {
             switch item {

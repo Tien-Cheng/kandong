@@ -72,7 +72,9 @@ struct FailureCard: View {
             .controlSize(.small)
             if !alternatives.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Or try with").font(.caption).foregroundStyle(.secondary)
+                    // Translated passages stay; another Backend gets only what's missing.
+                    let onlyRest = session.isLong && session.untranslated.count < session.passages.count
+                    Text(onlyRest ? "Translate the rest with" : "Or try with").font(.caption).foregroundStyle(.secondary)
                     FlowLayout(spacing: 6, lineSpacing: 6) {
                         ForEach(alternatives) { config in
                             Button {

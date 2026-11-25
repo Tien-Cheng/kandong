@@ -6,37 +6,35 @@ struct WordList: View {
     let model: AppModel
     let controller: ResultPanelController
     let session: LookupSession
-    @ViewState private var showAllWords = false
-
-    private static let longTextThreshold = 1500
+    /// Long text: the new words are folded away too, so the passages stay the thing to read.
+    var isFolded = false
 
     var body: some View {
         let words = session.uniqueWords
         let known = words.filter(model.isKnown)
         let unknown = words.filter { !model.isKnown($0) }
-        let isLong = session.sourceText.count > Self.longTextThreshold
-        let shown = isLong && !showAllWords ? Array(unknown.prefix(40)) : unknown
         VStack(alignment: .leading, spacing: 2) {
             if !unknown.isEmpty {
-                SectionTitle(known.isEmpty ? "Words" : "New words")
-                    .padding(.bottom, 4)
-            }
-            rows(shown)
-            if shown.count < unknown.count {
-                Button("Show all \(unknown.count) words") { showAllWords = true }
-                    .controlSize(.small)
-                    .padding(.top, 4)
+                if isFolded {
+                    folded("\(unknown.count) \(known.isEmpty ? "" : "new ")word\(unknown.count == 1 ? "" : "s")", unknown)
+                } else {
+                    SectionTitle(known.isEmpty ? "Words" : "New words")
+                        .padding(.bottom, 4)
+                    rows(unknown)
+                }
             }
             if !known.isEmpty {
-                DisclosureGroup {
-                    rows(known)
-                } label: {
-                    Text("\(known.count) known word\(known.count == 1 ? "" : "s") (up to \(HSKTable.label(for: model.settings.myLevel)))")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.top, 6)
+                folded("\(known.count) known word\(known.count == 1 ? "" : "s") (up to \(HSKTable.label(for: model.settings.myLevel)))", known)
+                    .padding(.top, 6)
             }
+        }
+    }
+
+    private func folded(_ title: String, _ words: [Segment]) -> some View {
+        DisclosureGroup {
+            rows(words)
+        } label: {
+            Text(title).font(.callout).foregroundStyle(.secondary)
         }
     }
 

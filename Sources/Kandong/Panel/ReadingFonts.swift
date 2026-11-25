@@ -30,7 +30,6 @@ final class ReadingFonts {
     private let latin: NSFont
     private let pinyin: NSFont
     private var lines: [LineKey: (line: CTLine, width: CGFloat)] = [:]
-    private var extents: [ReadingFace: (ascent: CGFloat, descent: CGFloat)] = [:]
 
     private init(style: ReadingStyle, typeface: ReadingTypeface) {
         han = ReadingFont.nsFont(size: style.hanSize, typeface: typeface)
@@ -64,17 +63,12 @@ final class ReadingFonts {
     }
 
     private func extent(_ face: ReadingFace) -> (ascent: CGFloat, descent: CGFloat) {
-        if let found = extents[face] { return found }
-        // Measured on real text, so a fallback face (PingFang for SF) counts.
-        let sample = switch face {
-        case .han: "国"
-        case .latin: "Hg"
-        case .pinyin: "ǎg"
+        switch face {
+        // WenKai's own; PingFang's are looser, and the rows should be the same in both.
+        case .han: (han.pointSize * 0.93, han.pointSize * 0.26)
+        case .latin: (latin.ascender, -latin.descender)
+        case .pinyin: (pinyin.ascender, -pinyin.descender)
         }
-        var ascent: CGFloat = 0, descent: CGFloat = 0
-        _ = CTLineGetTypographicBounds(make(sample, face), &ascent, &descent, nil)
-        extents[face] = (ascent, descent)
-        return (ascent, descent)
     }
 }
 

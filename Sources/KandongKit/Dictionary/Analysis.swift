@@ -67,10 +67,13 @@ public struct AddOnGloss: Hashable, Codable, Sendable {
 public struct OfflineAnalysis: Hashable, Codable, Sendable {
     public var source: String
     public var segments: [Segment]
+    /// Long text's passages; empty when the text is shown whole.
+    public var passages: [AnalysedPassage] = []
 
-    public init(source: String, segments: [Segment]) {
+    public init(source: String, segments: [Segment], passages: [AnalysedPassage] = []) {
         self.source = source
         self.segments = segments
+        self.passages = passages
     }
 
     public var words: [Segment] { segments.filter(\.isWord) }
@@ -84,6 +87,41 @@ public struct OfflineAnalysis: Hashable, Codable, Sendable {
         var seen = Set<String>()
         return words.filter { seen.insert($0.text + " " + $0.pinyin.lowercased()).inserted }
     }
+
+    /// The segments of one passage.
+    public func segments(of passage: AnalysedPassage) -> [Segment] {
+        Array(segments[passage.segments])
+    }
+
+    /// The passage a word is in.
+    public func passage(containing segmentID: Int) -> AnalysedPassage? {
+        passages.first { passage in segments[passage.segments].contains { $0.id == segmentID } }
+    }
+
+    /// The sentence a word is in, to save with it.
+    public func sentence(containing segmentID: Int) -> String {
+        let range = passage(containing: segmentID)?.segments ?? segments.indices
+        var start = 0, text = ""
+        for segment in segments[range] {
+            if segment.id == segmentID { start = text.count }
+            text += segment.original
+        }
+        var end = 0
+        for sentence in TextChunker.sentences(text) {
+            end += sentence.count
+            if start < end { return sentence.trimmingCharacters(in: .whitespacesAndNewlines) }
+        }
+        return text
+    }
+}
+
+/// A passage and its part of the analysis.
+public struct AnalysedPassage: Hashable, Codable, Sendable, Identifiable {
+    public var passage: Passage
+    /// Its segments, in `OfflineAnalysis.segments`.
+    public var segments: Range<Int>
+
+    public var id: Int { passage.id }
 }
 
 extension Character {

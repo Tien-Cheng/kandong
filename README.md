@@ -54,11 +54,14 @@ Tests: `swift test`. Backend eval (多音字, Translation fidelity, Reverse, Exp
 
 All shortcuts can be changed in Settings. Tap again while the panel is open to close it, or, for text that mixes Chinese and English, to say it all in Chinese instead (the 中 → EN button in the panel's header does the same).
 
+Text longer than a paragraph or so is shown in passages, each with its translation beneath it.
+
 In the panel, click a word (or use ← →) to see what it means and save it to your Vocabulary:
 
 | Key | In the panel |
 |---|---|
 | ← → | Previous / next word |
+| ↑ ↓ | Previous / next passage (long text) |
 | Space | Say the word (or the whole text) |
 | S | Save the word to Vocabulary |
 | E | Explain |

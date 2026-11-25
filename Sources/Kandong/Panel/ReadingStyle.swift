@@ -80,8 +80,10 @@ enum ReadingFont {
         typeface == .kai && isAvailable ? .custom(postScriptName, fixedSize: size) : .system(size: size)
     }
 
+    /// PingFang by name: left to fall back from SF, a full-width comma on its own comes from another face.
     @MainActor static func nsFont(size: CGFloat, typeface: ReadingTypeface) -> NSFont {
-        (typeface == .kai && isAvailable ? NSFont(name: postScriptName, size: size) : nil) ?? .systemFont(ofSize: size)
+        (typeface == .kai && isAvailable ? NSFont(name: postScriptName, size: size) : nil)
+            ?? NSFont(name: "PingFangSC-Regular", size: size) ?? .systemFont(ofSize: size)
     }
 }
 

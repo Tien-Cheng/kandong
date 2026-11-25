@@ -24,25 +24,32 @@ enum PanelTimings {
             let session = LookupSession(source: .selection)
             session.sourceText = text
             let analyse = time { session.analysis = engine.offline(text) }
+            session.split(into: session.analysis?.passages.map(\.passage) ?? [])
+            session.analysis = session.analysis
             session.status = .translating
-            model.session = session
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 640), styleMask: [.titled], backing: .buffered, defer: false)
-            window.isReleasedWhenClosed = false
-            var host: NSHostingView<ResultView>!
+            // The panel itself, never shown.
+            let host = controller.offscreenContent(size: NSSize(width: 480, height: 640))
+            settle(host)
             let open = time {
-                host = NSHostingView(rootView: ResultView(model: model, controller: controller))
-                host.sizingOptions = []
-                window.contentView = host
+                model.session = session
                 settle(host)
             }
             controller.selectWord(step: 1)
             settle(host)
             let arrows = (1...10).map { _ in time { controller.selectWord(step: 1); settle(host) } }
+            if session.isLong { await checkScrolling(controller, session, host) }
+            let jumps = session.isLong ? (1...10).map { _ in time { controller.selectPassage(step: 1); settle(host) } } : []
             controller.selectedWordID = nil
             settle(host)
             let streamed = (1...20).map { count in
                 time {
-                    session.progress = LookupProgress(completedParts: 0, totalParts: 1, translation: String(repeating: "a word or two ", count: count))
+                    let text = String(repeating: "a word or two ", count: count)
+                    if let passage = session.passages.first {
+                        passage.status = .translating
+                        passage.translation = text
+                    } else {
+                        session.progress = LookupProgress(completedParts: 0, totalParts: 1, translation: text)
+                    }
                     settle(host)
                 }
             }
@@ -56,8 +63,45 @@ enum PanelTimings {
                     }
                 }
             }
-            print("\(length) chars, ms: analyse \(ms(analyse))  open \(ms(open))  arrow \(range(arrows))  streamed \(range(streamed))  scroll \(range(scrolls))")
+            print("\(length) chars, ms: analyse \(ms(analyse))  open \(ms(open))  arrow \(range(arrows))  passage \(range(jumps))  streamed \(range(streamed))  scroll \(range(scrolls))")
         }
+    }
+
+    /// Steps far through the text, and checks every selected word can be seen and that the text in
+    /// sight stays put when the passages above it are translated.
+    private static func checkScrolling(_ controller: ResultPanelController, _ session: LookupSession, _ host: NSView) async {
+        // Not a nested run loop: the scrolling waits on the main queue, which this runs on.
+        func waitAndCheck() async -> Bool {
+            for _ in 0..<12 {
+                settle(host)
+                try? await Task.sleep(for: .milliseconds(30))
+            }
+            guard let id = controller.selectedWordID else { return false }
+            return controller.readingBlocks.allObjects.contains { $0.window != nil && $0.contains(word: id) && $0.shows(word: id) }
+        }
+        var seen = 0, steps = 0
+        for _ in 0..<12 { controller.selectPassage(step: 1); steps += 1; seen += await waitAndCheck() ? 1 : 0 }
+        for _ in 0..<30 { controller.selectWord(step: 1); steps += 1; seen += await waitAndCheck() ? 1 : 0 }
+        for _ in 0..<6 { controller.selectPassage(step: -1); steps += 1; seen += await waitAndCheck() ? 1 : 0 }
+        controller.selectedWordID = session.words.last?.id
+        steps += 1
+        seen += await waitAndCheck() ? 1 : 0
+        print("  selected word in sight \(seen)/\(steps)")
+        controller.selectedWordID = nil
+        guard let scrollView = scrollView(in: host) else { return }
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: 1500))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        _ = await waitAndCheck()
+        guard let block = controller.readingBlocks.allObjects.filter({ $0.visibleTop != nil }).min(by: { $0.visibleTop! < $1.visibleTop! }),
+              let passage = block.passage, let before = block.visibleTop else { return }
+        let offset = before - scrollView.contentView.bounds.minY
+        for state in session.passages.prefix(passage) { state.translation = String(repeating: "A line of the Translation. ", count: 8); state.status = .done }
+        _ = await waitAndCheck()
+        let after = block.visibleTop.map { $0 - scrollView.contentView.bounds.minY }
+        print("  passage \(passage) in sight at \(ms(offset)), after \(passage) above it were translated: \(after.map(ms) ?? "gone")")
+        for state in session.passages { state.translation = nil; state.status = .waiting }
+        scrollView.contentView.scroll(to: .zero)
+        _ = await waitAndCheck()
     }
 
     private static func settle(_ host: NSView) {
@@ -78,7 +122,7 @@ enum PanelTimings {
         return (CFAbsoluteTimeGetCurrent() - start) * 1000
     }
 
-    private static func ms(_ value: Double) -> String { String(format: "%.1f", value) }
+    private static func ms(_ value: CGFloat) -> String { String(format: "%.1f", value) }
     private static func range(_ values: [Double]) -> String {
         let sorted = values.sorted()
         return sorted.isEmpty ? "–" : "median \(ms(sorted[sorted.count / 2])) max \(ms(sorted.last!))"

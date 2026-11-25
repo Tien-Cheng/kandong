@@ -23,6 +23,10 @@ Everything shown for one Lookup: Reading, Word breakdown, Translation and, on re
 The text with pinyin shown above each character, coloured by tone.
 _Avoid_: Ruby, pinyin view
 
+**Passage**:
+One block of a long text (a paragraph, or part of a long one), shown as its Reading with its Translation beneath it. Short text has none and is shown whole.
+_Avoid_: Chunk, part (what a text is sent to a Backend in), section
+
 **Word breakdown**:
 The text split into words, each with its pinyin, gloss and HSK level; a word read two ways (还 hái, 还 huán) appears once per reading.
 
@@ -36,10 +40,10 @@ An extra word list the user adds to the built-in dictionary, e.g. technical term
 _Avoid_: Plugin, custom dictionary
 
 **Translation**:
-A natural rendering of the whole text in the other language.
+A natural rendering of the whole text in the other language; a long text's is kept passage by passage.
 
 **Explanation**:
-Grammar and usage notes about the text, produced only when asked for.
+Grammar and usage notes about the text, or about one Passage of a long text, produced only when asked for.
 _Avoid_: Analysis, breakdown
 
 **Pass-through token**:

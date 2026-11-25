@@ -17,6 +17,7 @@ struct ReadingView: View {
                 saved: model.savedWords
             ),
             selectedID: controller.selectedWordID,
+            passage: nil,
             actions: controller
         )
     }
@@ -27,17 +28,31 @@ extension ResultPanelController: ReadingBlockActions {
         selectedWordID = selectedWordID == segment.id ? nil : segment.id
     }
 
-    func menu(for segment: Segment?) -> [ReadingMenuItem] {
-        guard let segment, let analysis = model.session?.analysis else { return [] }
-        return [
-            .action("Say \(segment.text)") { Speech.speak(segment.text) },
-            .action(model.isSaved(segment.text) ? "Remove from Vocabulary" : "Save to Vocabulary") { [model] in
-                model.toggleSaved(segment, sentence: analysis.source)
-            },
-            .separator,
-            .action("Copy \(segment.text)") { Pasteboard.copy(segment.text) },
-            .action("Copy Text") { Pasteboard.copy(analysis.source) },
-        ]
+    func menu(for segment: Segment?, in passage: Int?) -> [ReadingMenuItem] {
+        guard let session = model.session, let analysis = session.analysis else { return [] }
+        var items: [ReadingMenuItem] = []
+        if let segment {
+            items = [
+                .action("Say \(segment.text)") { Speech.speak(segment.text) },
+                .action(model.isSaved(segment.text) ? "Remove from Vocabulary" : "Save to Vocabulary") { [model] in
+                    model.toggleSaved(segment, sentence: session.sentence(of: segment))
+                },
+                .separator,
+                .action("Copy \(segment.text)") { Pasteboard.copy(segment.text) },
+            ]
+        }
+        if let state = passage.flatMap({ session.passage($0) }) {
+            let chinese = state.segments.map(\.original).joined()
+            if segment != nil { items.append(.separator) }
+            items.append(.action("Say Passage") { Speech.speak(chinese) })
+            items.append(.action("Copy Passage") { Pasteboard.copy(chinese) })
+            if let translation = state.translation, session.direction == .learn {
+                items.append(.action("Copy Passage’s Translation") { Pasteboard.copy(translation) })
+            }
+        } else {
+            items.append(.action("Copy Text") { Pasteboard.copy(analysis.source) })
+        }
+        return items
     }
 
     func register(_ view: ReadingBlockView) {

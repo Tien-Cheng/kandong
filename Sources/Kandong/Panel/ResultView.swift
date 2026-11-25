@@ -10,6 +10,8 @@ struct ResultView: View {
         Group {
             if let session = model.session {
                 SessionView(model: model, controller: controller, session: session)
+                    // Each Lookup starts at its top.
+                    .id(session.id)
             } else {
                 Text(model.lookupHint)
                     .foregroundStyle(.secondary)
@@ -29,6 +31,7 @@ private struct SessionView: View {
     let session: LookupSession
     @ViewState private var contentHeight: CGFloat = 0
     @ViewState private var viewportHeight: CGFloat = 0
+    @ViewState private var position = ScrollPosition(idType: Int.self)
 
     /// Gap between the glass edge and the sheet; the sheet's corners stay concentric with the panel's.
     private static let inset: CGFloat = 6
@@ -52,9 +55,13 @@ private struct SessionView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { contentHeight = $0; fit() }
             }
+            .scrollPosition($position)
+            .onChange(of: controller.passageToShow) { _, passage in
+                if let passage { position.scrollTo(id: passage, anchor: .top) }
+            }
             .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { viewportHeight = $0; fit() }
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                SelectedWordCard(model: model, controller: controller, session: session)
+                SheetFoot(model: model, controller: controller, session: session)
             }
             .background(Sheet.background, in: RoundedRectangle(cornerRadius: ResultPanelController.cornerRadius - Self.inset))
             .clipShape(RoundedRectangle(cornerRadius: ResultPanelController.cornerRadius - Self.inset))
@@ -72,6 +79,14 @@ private struct SessionView: View {
         if session.status == .readingImage {
             ProgressRow(text: "Reading the image…")
         }
+        if session.isLong {
+            longContent
+        } else {
+            shortContent
+        }
+    }
+
+    @ViewBuilder private var shortContent: some View {
         if session.direction == .reverse {
             Text(session.sourceText)
                 .font(.title3)
@@ -90,25 +105,73 @@ private struct SessionView: View {
             WordList(model: model, controller: controller, session: session)
         }
     }
+
+    @ViewBuilder private var longContent: some View {
+        PassagesView(model: model, controller: controller, session: session)
+        LongTextNotes(model: model, session: session)
+        ExplanationSection(model: model, session: session)
+        if session.analysis?.hasChinese == true {
+            LevelQuestion(model: model)
+            OpenAtLoginQuestion(model: model, session: session)
+            WordList(model: model, controller: controller, session: session, isFolded: true)
+        }
+    }
 }
 
-/// The word card, while a word is selected.
-private struct SelectedWordCard: View {
+/// What there is to say about a long text's Translation as a whole.
+private struct LongTextNotes: View {
+    let model: AppModel
+    let session: LookupSession
+
+    var body: some View {
+        if case .failed(let message) = session.status {
+            FailureCard(model: model, session: session, config: session.backend, message: message)
+        }
+        if session.status == .done {
+            // An entry from before History kept Translations by passage.
+            if session.isReopened, session.direction == .learn, let translation = session.translation,
+               session.passages.allSatisfy({ $0.translation == nil }) {
+                TranslationText(text: translation)
+            }
+            if let note = session.note {
+                Text(note).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+            if session.isReopened { ReopenedNote() }
+        }
+    }
+}
+
+struct ReopenedNote: View {
+    var body: some View {
+        Text("From History. Readings are the dictionary's; look it up again for context readings.")
+            .font(.caption).foregroundStyle(.secondary)
+    }
+}
+
+/// Docked at the sheet's foot: the selected word's card, else (long text) the actions.
+private struct SheetFoot: View {
     let model: AppModel
     let controller: ResultPanelController
     let session: LookupSession
 
     var body: some View {
         VStack(spacing: 0) {
-            if let word = controller.selectedWord, let analysis = session.analysis {
-                WordCard(model: model, controller: controller, word: word, sentence: analysis.source,
-                         typeface: model.settings.readingTypeface, showTraditional: session.showTraditional)
+            if let word = controller.selectedWord {
+                WordCard(model: model, controller: controller, word: word, sentence: session.sentence(of: word),
+                         typeface: model.settings.readingTypeface, showTraditional: session.showTraditional, isLong: session.isLong)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if session.isLong {
+                ActionBar(model: model, controller: controller, session: session)
+                    .transition(.opacity)
             }
         }
         // Only appearing and going away move; stepping to another word just shows it.
-        .animation(.snappy(duration: 0.22), value: controller.selectedWordID == nil)
+        .animation(reduceMotion ? nil : .snappy(duration: 0.22), value: controller.selectedWordID == nil)
+        // The card may have covered the word it's about.
+        .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { _ in controller.revealSelectedWord() }
     }
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 }
 
 /// The Translation as it comes in, or why there is none.
@@ -140,8 +203,7 @@ private struct TranslationSection: View {
                 Text(note).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
             }
             if session.isReopened {
-                Text("From History. Readings are the dictionary's; look it up again for context readings.")
-                    .font(.caption).foregroundStyle(.secondary)
+                ReopenedNote()
             }
         }
     }
