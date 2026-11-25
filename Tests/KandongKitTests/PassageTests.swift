@@ -53,9 +53,10 @@ private let sentence = "今天天气很好，我们去公园散步。"   // 15 c
             let elapsed = ContinuousClock.now - start
             return Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
         }
-        _ = seconds(50)
-        // Four times the text; quadratic work would take sixteen times as long.
-        #expect(seconds(800) < seconds(200) * 10)
+        // The fastest of a few, so a busy machine doesn't count. Four times the text; quadratic work
+        // would take sixteen times as long.
+        func fastest(_ sentences: Int) -> Double { (0..<5).map { _ in seconds(sentences) }.min()! }
+        #expect(fastest(800) < fastest(200) * 10)
     }
 
     @Test func aShortTailStaysWithItsParagraph() {
@@ -394,26 +395,94 @@ private actor Reports {
         #expect(alone.segments.map(\.id) == analysis.segments(of: analysis.passages[1]).map(\.id))
     }
 
-    /// Measures slowly, and counts what it's asked.
-    private final class SlowToMeasure: AIBackend, @unchecked Sendable {
-        let label = "Slow"
+    /// Holds one of its measurements until it's let go, and counts what it's asked.
+    private final class HeldWhileMeasuring: AIBackend, @unchecked Sendable {
+        let label = "Held"
         let readingMode = ReadingMode.choose
+        /// The measurement held, from 1.
+        let held: Int
         /// Whether passages asked for by key are measured as too long.
         let turnsAwayPassages: Bool
         private let lock = NSLock()
-        private var count = 0
-        init(turnsAwayPassages: Bool = false) { self.turnsAwayPassages = turnsAwayPassages }
-        var requests: Int { lock.withLock { count } }
+        private var measured = 0, asked = 0
+        private var waiting: CheckedContinuation<Void, Never>?
+        private var reached: CheckedContinuation<Bool, Never>?
+        private var isReached = false, isOver = false
+
+        init(held: Int, turnsAwayPassages: Bool = false) {
+            self.held = held
+            self.turnsAwayPassages = turnsAwayPassages
+        }
+
+        var requests: Int { lock.withLock { asked } }
         func supportsImages() async -> Bool { false }
+
         func fits(_ request: AIRequest) async -> Bool? {
+            let number = lock.withLock { measured += 1; return measured }
             // Goes on measuring after it's cancelled, as a Backend may.
-            await withCheckedContinuation { done in DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { done.resume() } }
+            if number == held {
+                await withCheckedContinuation { continuation in
+                    let reached = lock.withLock {
+                        waiting = continuation
+                        isReached = true
+                        defer { self.reached = nil }
+                        return self.reached
+                    }
+                    reached?.resume(returning: true)
+                }
+            }
             return !(turnsAwayPassages && request.user.contains("[p0"))
         }
+
         func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> {
-            lock.withLock { count += 1 }
+            lock.withLock { asked += 1 }
             return AsyncThrowingStream { $0.finish() }
         }
+
+        /// True once the measurement is being held; false if the work ended without it.
+        func isHeld() async -> Bool {
+            await withCheckedContinuation { continuation in
+                let now: Bool? = lock.withLock {
+                    if isReached || isOver { return isReached }
+                    reached = continuation
+                    return nil
+                }
+                if let now { continuation.resume(returning: now) }
+            }
+        }
+
+        func workEnded() {
+            let reached = lock.withLock {
+                isOver = true
+                defer { self.reached = nil }
+                return self.reached
+            }
+            reached?.resume(returning: false)
+        }
+
+        func letGo() {
+            lock.withLock { defer { waiting = nil }; return waiting }?.resume()
+        }
+    }
+
+    /// Cancels `work` during each of its measurements in turn: nothing may be sent after that.
+    private func sendsNothingOnceCancelled(
+        turnsAwayPassages: Bool = false, _ work: @escaping @Sendable (AIBackend) async throws -> Void
+    ) async -> Int {
+        for held in 1... {
+            let backend = HeldWhileMeasuring(held: held, turnsAwayPassages: turnsAwayPassages)
+            let task = Task {
+                try? await work(backend)
+                backend.workEnded()
+            }
+            guard await backend.isHeld() else { return held - 1 }
+            let before = backend.requests
+            task.cancel()
+            backend.letGo()
+            await task.value
+            #expect(backend.requests == before, "cancelled during measurement \(held)")
+        }
+        return 0
     }
 
     @Test func stoppedWhileMeasuringSendsNothing() async throws {
@@ -422,27 +491,17 @@ private actor Reports {
                                   workspace: Workspace(folder: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)))
         let paragraph = String(repeating: sentence, count: 5) + "还。"
         let analysis = engine.offline([paragraph, paragraph].joined(separator: "\n"))
-        let backend = SlowToMeasure()
         let wanted = analysis.passages.map(\.passage)
-        let tasks = [
-            Task { try await engine.contextReadings(analysis, translations: [0: "English", 1: "English"], backend: backend) { _, _ in } },
-            Task { _ = try await engine.contextReadings(analysis, english: "English", backend: backend) },
-            Task { _ = try await engine.learnPassages(analysis, wanted: wanted, backend: backend) },
-        ]
-        try await Task.sleep(for: .milliseconds(60))
-        tasks.forEach { $0.cancel() }
-        for task in tasks { _ = await task.result }
-        #expect(backend.requests == 0)
+        // Each must have been measured, or this checks nothing.
+        #expect(await sendsNothingOnceCancelled { backend in
+            try await engine.contextReadings(analysis, translations: [0: "English", 1: "English"], backend: backend) { _, _ in }
+        } > 0)
+        #expect(await sendsNothingOnceCancelled { backend in _ = try await engine.contextReadings(analysis, english: "English", backend: backend) } > 0)
+        #expect(await sendsNothingOnceCancelled { backend in _ = try await engine.learnPassages(analysis, wanted: wanted, backend: backend) } > 0)
         // Nor the ordinary request that a passage too long for this one falls back to.
-        for delay in [60, 260, 460, 660] {
-            let turnsAway = SlowToMeasure(turnsAwayPassages: true)
-            let task = Task { _ = try await engine.learnPassages(analysis, wanted: [wanted[0]], backend: turnsAway) }
-            try await Task.sleep(for: .milliseconds(delay))
-            let before = turnsAway.requests
-            task.cancel()
-            _ = await task.result
-            #expect(turnsAway.requests == before)
-        }
+        #expect(await sendsNothingOnceCancelled(turnsAwayPassages: true) { backend in
+            _ = try await engine.learnPassages(analysis, wanted: [wanted[0]], backend: backend)
+        } > 1)
     }
 
     @Test func translatesOnlyWhatIsWanted() async throws {
