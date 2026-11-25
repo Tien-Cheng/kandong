@@ -93,6 +93,7 @@ private struct SessionView: View {
             actions
             explanationSection
             levelQuestion
+            openAtLoginQuestion
             breakdownSection
         }
     }
@@ -196,8 +197,8 @@ private struct SessionView: View {
 
     /// Asked once: which words to fold away as already known.
     @ViewBuilder private var levelQuestion: some View {
-        if !model.settings.hasChosenLevel, model.settings.myLevel == 0 {
-            VStack(alignment: .leading, spacing: 8) {
+        if model.settings.asksAboutLevel {
+            QuestionCard {
                 Text("Fold away words you already know?").font(.callout.weight(.medium))
                 HStack(spacing: 6) {
                     Text("Up to").font(.callout).foregroundStyle(.secondary)
@@ -214,9 +215,26 @@ private struct SessionView: View {
                 .controlSize(.small)
                 Text("You can change this in Settings → Learning.").font(.caption).foregroundStyle(.secondary)
             }
-            .padding(10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    /// Asked once: Kandong's shortcuts only work while it's open.
+    @ViewBuilder private var openAtLoginQuestion: some View {
+        if model.asksAboutOpenAtLogin(in: session) {
+            QuestionCard {
+                Text("Open Kandong when you log in?").font(.callout.weight(.medium))
+                HStack(spacing: 6) {
+                    Button("Open at login") { model.answerOpenAtLogin(true) }
+                    Button("Not now") { model.answerOpenAtLogin(false) }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.secondary)
+                }
+                .controlSize(.small)
+                if let error = model.loginItem.errorMessage {
+                    Text(error).font(.caption).foregroundStyle(Sheet.corrected).textSelection(.enabled)
+                }
+                Text("You can change this in Settings → General.").font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -856,6 +874,18 @@ private struct FailureCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Sheet.corrected.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
         .task { await model.refreshStatuses() }
+    }
+}
+
+/// A one-time question in the Result.
+private struct QuestionCard<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) { content }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 

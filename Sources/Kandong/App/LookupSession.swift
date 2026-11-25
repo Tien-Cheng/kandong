@@ -38,6 +38,8 @@ final class LookupSession: Identifiable {
     var historyID: Int64?
     /// Shown again from History: the stored Translation with the dictionary's readings.
     var isReopened = false
+    /// Whether the panel may ask about opening at login: the question about My level was answered before.
+    var mayAskOpenAtLogin = false
     /// Message shown instead of a Result (e.g. "No selection").
     var message: String?
 

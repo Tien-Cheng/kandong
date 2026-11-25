@@ -97,6 +97,9 @@ public struct AppSettings: Codable, Hashable, Sendable {
     public var myLevel = 0
     /// Whether the user has answered the panel's one-time question about My level.
     public var hasChosenLevel = false
+    /// Whether the user has answered the panel's one-time question about opening at login. Whether
+    /// Kandong does open at login isn't kept here: macOS knows, and the user can change it there.
+    public var hasAnsweredOpenAtLogin = false
     public var pinyinForUnknownOnly = false
     /// How the Chinese in the Reading is set.
     public var readingTypeface: ReadingTypeface = .kai
@@ -118,6 +121,9 @@ public struct AppSettings: Codable, Hashable, Sendable {
     public func backend(id: String) -> BackendConfig? {
         backends.first { $0.id == id }
     }
+
+    /// Whether the panel still asks which words the user already knows.
+    public var asksAboutLevel: Bool { !hasChosenLevel && myLevel == 0 }
 
     /// The Backend for a Lookup: the Local one when ⇧ is held. The Local one must keep text on this
     /// Mac, even if its URL was edited since it was chosen; otherwise Apple Intelligence answers.
@@ -151,7 +157,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case backends, defaultBackendID, localBackendID, chatGPT, hotkeys, tapKey, myLevel, hasChosenLevel, pinyinForUnknownOnly
-        case readingTypeface, alwaysExplain, workspacePath, historyRetentionDays
+        case hasAnsweredOpenAtLogin, readingTypeface, alwaysExplain, workspacePath, historyRetentionDays
     }
 
     /// Before Backends were a list there was one LM Studio and one custom endpoint, chosen by kind.
@@ -197,6 +203,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         myLevel = (try? c.decodeIfPresent(Int.self, forKey: .myLevel)) ?? d.myLevel
         // Someone who already set a level has answered the question.
         hasChosenLevel = (try? c.decodeIfPresent(Bool.self, forKey: .hasChosenLevel)) ?? (myLevel != 0)
+        hasAnsweredOpenAtLogin = (try? c.decodeIfPresent(Bool.self, forKey: .hasAnsweredOpenAtLogin)) ?? d.hasAnsweredOpenAtLogin
         readingTypeface = (try? c.decodeIfPresent(ReadingTypeface.self, forKey: .readingTypeface)) ?? d.readingTypeface
         pinyinForUnknownOnly = (try? c.decodeIfPresent(Bool.self, forKey: .pinyinForUnknownOnly)) ?? d.pinyinForUnknownOnly
         alwaysExplain = (try? c.decodeIfPresent(Bool.self, forKey: .alwaysExplain)) ?? d.alwaysExplain

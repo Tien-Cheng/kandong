@@ -6,6 +6,7 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            GeneralSection(model: model)
             shortcutsSection
             learningSection
             workspaceSection
@@ -166,6 +167,41 @@ struct SettingsView: View {
         if panel.runModal() == .OK, let url = panel.url {
             model.settings.workspacePath = (url.path as NSString).abbreviatingWithTildeInPath
         }
+    }
+}
+
+// MARK: - General
+
+private struct GeneralSection: View {
+    let model: AppModel
+
+    var body: some View {
+        let loginItem = model.loginItem
+        Section {
+            Toggle(isOn: Binding(get: { loginItem.state == .on }, set: { model.setOpenAtLogin($0) })) {
+                Text("Open Kandong at login")
+                if loginItem.state == .unavailable {
+                    Text("Move Kandong to Applications to open it at login.")
+                }
+            }
+            .disabled(loginItem.state == .blocked || loginItem.state == .unavailable)
+            if loginItem.state == .blocked {
+                LabeledContent {
+                    Button("Open Login Items") { loginItem.openSystemSettings() }
+                } label: {
+                    Text("Turned off in System Settings").foregroundStyle(.orange)
+                }
+            }
+            if let error = loginItem.errorMessage {
+                Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+            }
+        } header: {
+            Text("General")
+        } footer: {
+            Text("Kandong's shortcuts work while it's open. At login it opens in the menu bar, without a window.")
+        }
+        .onAppear { loginItem.refresh() }
+        .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in loginItem.refresh() }
     }
 }
 
