@@ -847,14 +847,19 @@ final class AppModel {
     // MARK: Learning
 
     private func countEncounters(in analysis: OfflineAnalysis) {
-        let saved = Set(workspace.vocabulary().map(\.simplified))
+        let saved = workspace.vocabularyWords()
         let seen = Set(analysis.words.map(\.text)).intersection(saved)
         if !seen.isEmpty { history.recordEncounters(seen) }
     }
 
-    func isSaved(_ word: String) -> Bool {
+    /// The Vocabulary's words.
+    var savedWords: Set<String> {
         _ = workspaceRevision
-        return workspace.vocabulary().contains { $0.simplified == word }
+        return workspace.vocabularyWords()
+    }
+
+    func isSaved(_ word: String) -> Bool {
+        savedWords.contains(word)
     }
 
     func toggleSaved(_ segment: Segment, sentence: String) {

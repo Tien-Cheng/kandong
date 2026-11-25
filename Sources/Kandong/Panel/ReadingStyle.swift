@@ -6,7 +6,9 @@ import KandongKit
 /// Pleco-style tone colours, tuned per appearance so 12pt pinyin keeps 4.5:1 on the reading sheet,
 /// and darker (or lighter) still with Increase Contrast.
 enum ToneColor {
-    static func color(_ tone: Int) -> Color {
+    static func color(_ tone: Int) -> Color { Color(nsColor: nsColor(tone)) }
+
+    static func nsColor(_ tone: Int) -> NSColor {
         switch tone {
         case 1: tone1
         case 2: tone2
@@ -16,28 +18,30 @@ enum ToneColor {
         }
     }
 
-    private static let tone1 = Color.adaptive(light: 0xD0312D, dark: 0xFF6961, lightHC: 0xA51D1A, darkHC: 0xFF9690)
-    private static let tone2 = Color.adaptive(light: 0x1F7F3A, dark: 0x4CD472, lightHC: 0x135E28, darkHC: 0x7EE69A)
-    private static let tone3 = Color.adaptive(light: 0x2160C8, dark: 0x6EA8FF, lightHC: 0x16459A, darkHC: 0xA1C6FF)
-    private static let tone4 = Color.adaptive(light: 0x8340BF, dark: 0xC792FF, lightHC: 0x62268F, darkHC: 0xDDB8FF)
-    private static let neutral = Color.adaptive(light: 0x737373, dark: 0xA3A3A3, lightHC: 0x545454, darkHC: 0xC8C8C8)
+    private static let tone1 = NSColor.adaptive(light: 0xD0312D, dark: 0xFF6961, lightHC: 0xA51D1A, darkHC: 0xFF9690)
+    private static let tone2 = NSColor.adaptive(light: 0x1F7F3A, dark: 0x4CD472, lightHC: 0x135E28, darkHC: 0x7EE69A)
+    private static let tone3 = NSColor.adaptive(light: 0x2160C8, dark: 0x6EA8FF, lightHC: 0x16459A, darkHC: 0xA1C6FF)
+    private static let tone4 = NSColor.adaptive(light: 0x8340BF, dark: 0xC792FF, lightHC: 0x62268F, darkHC: 0xDDB8FF)
+    private static let neutral = NSColor.adaptive(light: 0x737373, dark: 0xA3A3A3, lightHC: 0x545454, darkHC: 0xC8C8C8)
 }
 
 /// Colours of the reading sheet and the marks drawn on it.
 enum Sheet {
     /// The solid surface the Reading sits on, inside the glass panel: a faintly warm paper in light,
     /// near-black in dark, so tone colours never depend on what's behind the panel.
-    static let background = Color.adaptive(light: 0xFCFBF8, dark: 0x1C1C1E, lightHC: 0xFFFFFF, darkHC: 0x000000)
+    static let background = Color(nsColor: .adaptive(light: 0xFCFBF8, dark: 0x1C1C1E, lightHC: 0xFFFFFF, darkHC: 0x000000))
     /// A reading the AI changed for this context.
-    static let corrected = Color.adaptive(light: 0xB35900, dark: 0xFFA94D, lightHC: 0x8A4400, darkHC: 0xFFC27F)
+    static let corrected = Color(nsColor: correctedNSColor)
+    static let correctedNSColor = NSColor.adaptive(light: 0xB35900, dark: 0xFFA94D, lightHC: 0x8A4400, darkHC: 0xFFC27F)
     /// A word in the Vocabulary.
-    static let saved = Color.adaptive(light: 0xB08400, dark: 0xF2C94C, lightHC: 0x7A5C00, darkHC: 0xFFDB70)
+    static let saved = Color(nsColor: savedNSColor)
+    static let savedNSColor = NSColor.adaptive(light: 0xB08400, dark: 0xF2C94C, lightHC: 0x7A5C00, darkHC: 0xFFDB70)
 }
 
-extension Color {
+extension NSColor {
     /// A colour that follows light/dark appearance and Increase Contrast.
-    static func adaptive(light: UInt32, dark: UInt32, lightHC: UInt32, darkHC: UInt32) -> Color {
-        Color(nsColor: NSColor(name: nil) { appearance in
+    static func adaptive(light: UInt32, dark: UInt32, lightHC: UInt32, darkHC: UInt32) -> NSColor {
+        NSColor(name: nil) { appearance in
             let match = appearance.bestMatch(from: [.aqua, .darkAqua, .accessibilityHighContrastAqua, .accessibilityHighContrastDarkAqua])
             switch match {
             case .darkAqua: return NSColor(hex: dark)
@@ -45,12 +49,10 @@ extension Color {
             case .accessibilityHighContrastDarkAqua: return NSColor(hex: darkHC)
             default: return NSColor(hex: light)
             }
-        })
+        }
     }
-}
 
-private extension NSColor {
-    convenience init(hex: UInt32) {
+    private convenience init(hex: UInt32) {
         self.init(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255, green: CGFloat((hex >> 8) & 0xFF) / 255,
                   blue: CGFloat(hex & 0xFF) / 255, alpha: 1)
     }
@@ -76,6 +78,10 @@ enum ReadingFont {
 
     @MainActor static func font(size: CGFloat, typeface: ReadingTypeface) -> Font {
         typeface == .kai && isAvailable ? .custom(postScriptName, fixedSize: size) : .system(size: size)
+    }
+
+    @MainActor static func nsFont(size: CGFloat, typeface: ReadingTypeface) -> NSFont {
+        (typeface == .kai && isAvailable ? NSFont(name: postScriptName, size: size) : nil) ?? .systemFont(ofSize: size)
     }
 }
 

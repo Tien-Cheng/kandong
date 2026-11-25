@@ -22,7 +22,7 @@ final class ResultPanel: NSPanel {
 final class ResultPanelController: NSObject, NSWindowDelegate {
     @ObservationIgnored private let panel: ResultPanel
     @ObservationIgnored private var monitors: [Any] = []
-    @ObservationIgnored private unowned let model: AppModel
+    @ObservationIgnored unowned let model: AppModel
     var isPinned = false
     /// The word picked in the Reading (by click or ←/→), shown in the word card; a Segment id.
     var selectedWordID: Int?
@@ -34,6 +34,9 @@ final class ResultPanelController: NSObject, NSWindowDelegate {
     @ObservationIgnored private var userSizedHeight = false
     /// The height the content last asked for, applied once the current layout pass is over.
     @ObservationIgnored private var pendingHeight: CGFloat?
+
+    /// The Reading's views, to scroll a word into sight.
+    @ObservationIgnored let readingBlocks = NSHashTable<ReadingBlockView>.weakObjects()
 
     static let cornerRadius: CGFloat = 16
 
