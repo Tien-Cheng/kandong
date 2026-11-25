@@ -86,6 +86,12 @@ enum PanelTimings {
         controller.selectedWordID = session.words.last?.id
         steps += 1
         seen += await waitAndCheck() ? 1 : 0
+        // What VoiceOver gets: a button for each word that says it's enabled, and works.
+        let block = controller.readingBlocks.allObjects.first { $0.window != nil && $0.content.segments.contains(where: \.isWord) }
+        let buttons = (block?.accessibilityChildren() ?? []).compactMap { $0 as? NSAccessibilityElement }.filter { $0.accessibilityRole() == .button }
+        controller.selectedWordID = nil
+        let pressed = buttons.first?.accessibilityPerformPress() == true && controller.selectedWordID != nil
+        print("  words to VoiceOver \(buttons.count { $0.isAccessibilityEnabled() && $0.accessibilityLabel()?.isEmpty == false })/\(buttons.count) enabled, press \(pressed ? "works" : "fails")")
         print("  selected word in sight \(seen)/\(steps)")
         controller.selectedWordID = nil
         guard let scrollView = scrollView(in: host) else { return }

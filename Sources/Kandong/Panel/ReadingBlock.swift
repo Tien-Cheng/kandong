@@ -333,6 +333,8 @@ private final class ReadingElement: NSAccessibilityElement {
         super.init()
         setAccessibilityRole(role)
         setAccessibilityParent(view)
+        // An element is disabled until it says otherwise.
+        setAccessibilityEnabled(true)
         if role == .staticText { setAccessibilityValue(label) } else { setAccessibilityLabel(label) }
     }
 

@@ -308,7 +308,11 @@ private actor Reports {
         let soFar: [String]
         private let lock = NSLock()
         private var asked = false
-        init(_ soFar: [String]) { self.soFar = soFar }
+        let apart: Duration
+        init(_ soFar: [String], apart: Duration = Pace.interval + .milliseconds(20)) {
+            self.soFar = soFar
+            self.apart = apart
+        }
         func supportsImages() async -> Bool { false }
         func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> { AsyncThrowingStream { $0.finish() } }
         func snapshots(of request: AIRequest) -> AsyncThrowingStream<String, Error> {
@@ -318,7 +322,7 @@ private actor Reports {
                 Task {
                     for reply in soFar {
                         continuation.yield(reply)
-                        try? await Task.sleep(for: Pace.interval + .milliseconds(20))
+                        try? await Task.sleep(for: apart)
                     }
                     continuation.finish(throwing: BackendError.cutOff(name: "Cut off"))
                 }
@@ -345,10 +349,32 @@ private actor Reports {
         #expect(once.texts.isEmpty)
     }
 
-    private func cutOff(_ soFar: [String]) async throws -> PassageReplies {
+    @Test func keepsEveryPassageKnownToBeFinished() async throws {
+        // Faster than the panel is updated: what was seen in between still counts.
+        let fast = try await cutOff([
+            #"{"passages": {"p01": "Half"}}"#,
+            #"{"passages": {"p01": "\#(Self.english)"}}"#,
+            #"{"passages": {"p02": "Half", "p01": "\#(Self.english)"}}"#,
+            #"{"passages": {"p01": "\#(Self.english)", "p02": "Half of"}}"#,
+        ], apart: .milliseconds(5))
+        #expect(fast.texts.keys.sorted() == [0])
+        // The note comes after the passages, so they're all finished.
+        let passages = Passage.split([String(repeating: "We went for a walk in the park. ", count: 6), String(repeating: "Then we went home. ", count: 14)].joined(separator: "\n\n"))
+        #expect(passages.count == 2)
+        let backend = CutOff([
+            #"{"chinese": {"p01": "我们今天去。"}}"#,
+            #"{"chinese": {"p02": "我们明天去。", "p01": "我们今天去。"}}"#,
+            #"{"note": "It is", "chinese": {"p02": "我们明天去。", "p01": "我们今天去。"}}"#,
+            #"{"chinese": {"p01": "我们今天去。", "p02": "我们明天去。"}, "note": "It is casual"}"#,
+        ])
+        let noted = try await engine().reversePassages(passages, of: passages, backend: backend)
+        #expect(noted.texts.keys.sorted() == [0, 1])
+    }
+
+    private func cutOff(_ soFar: [String], apart: Duration = Pace.interval + .milliseconds(20)) async throws -> PassageReplies {
         let engine = try engine()
         let analysis = engine.offline(Self.text)
-        return try await engine.learnPassages(analysis, wanted: analysis.passages.map(\.passage), backend: CutOff(soFar), progress: { _ in }).replies
+        return try await engine.learnPassages(analysis, wanted: analysis.passages.map(\.passage), backend: CutOff(soFar, apart: apart), progress: { _ in }).replies
     }
 
     @Test func wordIDsAreUniqueHoweverLongAPassage() throws {
@@ -357,6 +383,47 @@ private actor Reports {
         #expect(Set(analysis.segments.map(\.id)).count == analysis.segments.count)
         let word = try #require(analysis.segments(of: analysis.passages[1]).first)
         #expect(analysis.passage(containing: word.id)?.id == 1)
+        // A passage's words keep their ids whatever arrives after it.
+        let alone = try engine().analyzer.analyze([Passage(id: 1, text: "你好。", leading: "\n")], source: "")
+        #expect(alone.segments.map(\.id) == analysis.segments(of: analysis.passages[1]).map(\.id))
+    }
+
+    /// Measures slowly, and counts what it's asked.
+    private final class SlowToMeasure: AIBackend, @unchecked Sendable {
+        let label = "Slow"
+        let readingMode = ReadingMode.choose
+        private let lock = NSLock()
+        private var count = 0
+        var requests: Int { lock.withLock { count } }
+        func supportsImages() async -> Bool { false }
+        func fits(_ request: AIRequest) async -> Bool? {
+            // Goes on measuring after it's cancelled, as a Backend may.
+            await withCheckedContinuation { done in DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { done.resume() } }
+            return true
+        }
+        func respond(to request: AIRequest) -> AsyncThrowingStream<String, Error> {
+            lock.withLock { count += 1 }
+            return AsyncThrowingStream { $0.finish() }
+        }
+    }
+
+    @Test func stoppedWhileMeasuringSendsNothing() async throws {
+        let dictionary = CEDict(text: "还 还 [hai2] /still/\n还 还 [huan2] /to return/\n")
+        let engine = LookupEngine(analyzer: OfflineAnalyzer(dictionary: dictionary, hsk: HSKTable()),
+                                  workspace: Workspace(folder: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)))
+        let paragraph = String(repeating: sentence, count: 5) + "还。"
+        let analysis = engine.offline([paragraph, paragraph].joined(separator: "\n"))
+        let backend = SlowToMeasure()
+        let wanted = analysis.passages.map(\.passage)
+        let tasks = [
+            Task { try await engine.contextReadings(analysis, translations: [0: "English", 1: "English"], backend: backend) { _, _ in } },
+            Task { _ = try await engine.contextReadings(analysis, english: "English", backend: backend) },
+            Task { _ = try await engine.learnPassages(analysis, wanted: wanted, backend: backend) },
+        ]
+        try await Task.sleep(for: .milliseconds(60))
+        tasks.forEach { $0.cancel() }
+        for task in tasks { _ = await task.result }
+        #expect(backend.requests == 0)
     }
 
     @Test func translatesOnlyWhatIsWanted() async throws {

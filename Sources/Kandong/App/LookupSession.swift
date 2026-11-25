@@ -115,7 +115,11 @@ final class LookupSession: Identifiable {
     // MARK: Passages
 
     func split(into passages: [Passage]) {
-        self.passages = passages.map { PassageState($0, direction: direction) }
+        show(passages.map { PassageState($0, direction: direction) })
+    }
+
+    func show(_ passages: [PassageState]) {
+        self.passages = passages
     }
 
     var isLong: Bool { !passages.isEmpty }

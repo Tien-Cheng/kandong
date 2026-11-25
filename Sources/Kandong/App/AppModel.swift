@@ -677,36 +677,38 @@ final class AppModel {
         session.direction = entry.direction
         session.historyID = entry.id
         session.isReopened = true
-        session.translation = entry.translation
         session.status = .done
         panel.show(near: nil)
+        // Everything is shown at once, when it has been read: until then there is nothing to retry.
         session.tasks.append(Task {
-            let passages = await Self.split(entry.text)
-            guard !Task.isCancelled, self.session === session else { return }
+            let isLearn = entry.direction == .learn
+            let split = await Self.split(entry.text)
             // Passages read the way they were translated; an older entry's Translation is shown whole.
-            let kept = !passages.isEmpty && passages.count == entry.passages.count
-            if !passages.isEmpty, kept || entry.direction == .learn { session.split(into: passages) }
-            for (state, translation) in zip(session.passages, entry.passages) where kept {
+            let isKept = !split.isEmpty && split.count == entry.passages.count
+            let states = split.map { PassageState($0, direction: entry.direction) }
+            for (state, translation) in zip(states, entry.passages) where isKept {
                 state.translation = translation.isEmpty ? nil : translation
                 state.status = translation.isEmpty && state.needsTranslation ? .missing : .done
             }
-            if !kept { session.passages.forEach { $0.status = .done } }
-            if entry.direction == .reverse, session.isLong {
-                let chinese = Self.chinesePassages(of: session)
-                let analysis = await Task.detached(priority: .userInitiated) { engine.analyzer.analyze(chinese, source: entry.translation) }.value
-                guard !Task.isCancelled, self.session === session else { return }
-                session.analysis = analysis
+            if !isKept { states.forEach { $0.status = .done } }
+            let analysis: OfflineAnalysis
+            if !isLearn, isKept {
+                let chinese = Self.chinesePassages(of: states)
+                analysis = await Task.detached(priority: .userInitiated) { engine.analyzer.analyze(chinese, source: entry.translation) }.value
             } else {
-                let analysis = await Self.analyse(entry.direction == .learn ? entry.text : entry.translation, with: engine)
-                guard !Task.isCancelled, self.session === session else { return }
-                // An old Reverse entry's Chinese, long enough for passages of its own, has no English beside them.
-                if session.passages.isEmpty, !analysis.passages.isEmpty {
-                    session.split(into: analysis.passages.map(\.passage))
-                    session.passages.forEach { $0.status = .done }
-                    session.hidesSourcePassages = true
-                }
-                session.analysis = analysis
+                analysis = await Self.analyse(isLearn ? entry.text : entry.translation, with: engine)
             }
+            guard !Task.isCancelled, self.session === session else { return }
+            session.translation = entry.translation
+            if isLearn || isKept {
+                session.show(states)
+            } else if !analysis.passages.isEmpty {
+                // An old Reverse entry's Chinese, long enough for passages of its own, has no English beside them.
+                session.split(into: analysis.passages.map(\.passage))
+                session.passages.forEach { $0.status = .done }
+                session.hidesSourcePassages = true
+            }
+            session.analysis = analysis
         })
     }
 
@@ -715,8 +717,8 @@ final class AppModel {
     }
 
     /// Reverse: the passages' Chinese so far, as passages of their own.
-    private static func chinesePassages(of session: LookupSession) -> [Passage] {
-        session.passages.compactMap { state in
+    private static func chinesePassages(of states: [PassageState]) -> [Passage] {
+        states.compactMap { state in
             let chinese = state.translation ?? (state.needsTranslation ? nil : state.passage.text)
             return chinese.map { Passage(id: state.id, text: $0.replacingOccurrences(of: "\n", with: ""), leading: state.passage.leading) }
         }
@@ -867,7 +869,8 @@ final class AppModel {
         let thinking: ThinkingHandler = { await MainActor.run { session.isThinking = true } }
         do {
             let replies: PassageReplies
-            if session.direction == .learn, let analysis = session.analysis {
+            if session.direction == .learn {
+                guard let analysis = session.analysis else { throw BackendError.failed("The text hasn't been read yet.") }
                 let (learned, corrected) = try await engine.learnPassages(analysis, wanted: wanted.map(\.passage), backend: backend, progress: progress, thinking: thinking)
                 replies = learned
                 guard !Task.isCancelled, self.session === session else { return }
@@ -927,7 +930,7 @@ final class AppModel {
 
     private func analyseChinese(of session: LookupSession, engine: LookupEngine) async {
         let finished = Set(session.passages.filter { $0.status == .done }.map(\.id))
-        let chinese = Self.chinesePassages(of: session).filter { finished.contains($0.id) }
+        let chinese = Self.chinesePassages(of: session.passages).filter { finished.contains($0.id) }
         let source = Passage.join(chinese) { $0.text }
         guard !chinese.isEmpty, source != session.analysis?.source else { return }
         let analysis = await Task.detached(priority: .userInitiated) { engine.analyzer.analyze(chinese, source: source) }.value

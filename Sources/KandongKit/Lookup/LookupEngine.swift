@@ -114,19 +114,37 @@ struct Pace {
 
 /// Which passages of a reply coming in aren't known to be finished.
 struct PassageWriting {
+    /// The replies' object of passages, and every passage asked for.
+    let object: String
+    let keys: Set<String>
     private(set) var unfinished: Set<String> = []
     private var seen: [String: String] = [:]
+
+    init(object: String, keys: Set<String>) {
+        self.object = object
+        self.keys = keys
+    }
+
+    /// Whether a reply so far is complete JSON, as Apple's are. Those list their keys in any order, so
+    /// what's being written shows only in what changes, and every one has to be looked at.
+    static func looksComplete(_ reply: String) -> Bool {
+        reply.reversed().first { !$0.isWhitespace } == "}"
+    }
 
     mutating func update(_ values: [(key: String, value: String, isComplete: Bool)], reply: String) {
         defer { seen = Dictionary(values.map { ($0.key, $0.value) }, uniquingKeysWith: { first, _ in first }) }
         // JSON still being written says so itself.
         let halfWritten = Set(values.filter { !$0.isComplete }.map(\.key))
-        guard halfWritten.isEmpty, reply.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("}") else {
+        guard halfWritten.isEmpty, Self.looksComplete(reply) else {
             unfinished = halfWritten
             return
         }
-        // Apple's replies so far are complete JSON, with keys in any order: what's being written is
-        // what changed last.
+        // The passages come first, so anything after them (a note, readings) means they're all written.
+        if keys.isSubset(of: values.map(\.key)), case .object(let parts)? = try? Prompts.decode(JSONValue.self, from: reply),
+           parts.keys.contains(where: { $0 != object }) {
+            unfinished = []
+            return
+        }
         let changed = values.filter { seen[$0.key] != $0.value }.map(\.key)
         if !changed.isEmpty { unfinished = Set(changed) }
     }
@@ -222,6 +240,7 @@ public struct LookupEngine: Sendable {
     public func contextReadings(_ analysis: OfflineAnalysis, english: String, backend: AIBackend) async throws -> OfflineAnalysis {
         guard let request = Prompts.readings(of: analysis, english: english, mode: backend.readingMode),
               await backend.fits(request) != false else { return analysis }
+        try Task.checkCancellation()
         let reply: LearnReply
         do {
             reply = try Prompts.parseReadings(try await backend.complete(request))
@@ -279,6 +298,8 @@ public struct LookupEngine: Sendable {
             let part = OfflineAnalysis(source: batch.map(\.passage.text).joined(separator: "\n"), segments: batch.flatMap { analysis.segments[$0.segments] })
             let english = batch.compactMap { translations[$0.id] }.joined(separator: "\n")
             guard let request = Prompts.readings(of: part, english: english, mode: .choose), await backend.fits(request) != false else { continue }
+            // Stopped while measuring: nothing more is sent.
+            try Task.checkCancellation()
             let reply = try Prompts.parseReadings(try await backend.complete(request))
             result = applyReadings(reply.readings, to: result)
             await progress(result, Set(batch.map(\.id)))
@@ -341,10 +362,15 @@ public struct LookupEngine: Sendable {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
             }
             var reply = ""
-            var writing = PassageWriting()
+            var writing = PassageWriting(object: object, keys: Set(byKey.keys))
+            func look() -> [(key: String, value: String, isComplete: Bool)] {
+                let text = Prompts.visibleText(reply)
+                let values = PartialJSON.stringValues(inObject: object, in: text)
+                writing.update(values, reply: text)
+                return values
+            }
             func show() async {
-                let values = PartialJSON.stringValues(inObject: object, in: Prompts.visibleText(reply))
-                writing.update(values, reply: reply)
+                let values = look()
                 guard let progress else { return }
                 var shown = PassageProgress(texts: result.texts)
                 for value in values {
@@ -365,7 +391,11 @@ public struct LookupEngine: Sendable {
                 var pace = Pace()
                 for try await snapshot in backend.snapshots(of: request) {
                     reply = snapshot
-                    if pace.isDue() { await show() }
+                    if pace.isDue() {
+                        await show()
+                    } else if PassageWriting.looksComplete(reply) {
+                        _ = look()
+                    }
                 }
                 let parsed = try Prompts.parsePassages(reply, direction)
                 keep(parsed.texts)
@@ -374,8 +404,7 @@ public struct LookupEngine: Sendable {
                 await progress?(PassageProgress(texts: result.texts))
             } catch {
                 // Cut off or malformed: the passages it did finish still count.
-                let values = PartialJSON.stringValues(inObject: object, in: Prompts.visibleText(reply))
-                writing.update(values, reply: reply)
+                let values = look()
                 keep(Dictionary(values.filter { !writing.unfinished.contains($0.key) }.map { ($0.key, $0.value) }, uniquingKeysWith: { first, _ in first }))
                 await progress?(PassageProgress(texts: result.texts))
                 throw error
@@ -388,6 +417,7 @@ public struct LookupEngine: Sendable {
             let prompt = request(batch, preceding(batch), step)
             do {
                 if await backend.fits(prompt) == false { throw BackendError.contextTooLong }
+                try Task.checkCancellation()
                 try await ask(batch, prompt)
             } catch BackendError.contextTooLong {
                 let left = batch.filter { result.texts[$0.id] == nil }
@@ -416,6 +446,7 @@ public struct LookupEngine: Sendable {
             trying: for candidate in steps {
                 let whole = request(wanted, preceding(wanted), candidate)
                 if await backend.fits(whole) == false { continue }
+                try Task.checkCancellation()
                 do {
                     try await ask(wanted, whole)
                 } catch BackendError.contextTooLong {

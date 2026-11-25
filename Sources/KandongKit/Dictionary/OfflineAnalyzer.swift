@@ -47,20 +47,23 @@ public final class OfflineAnalyzer: Sendable {
                 buffer[index] = analyze(passages[index].text).segments
             }
         }
-        // Room for every passage's words; only a passage of absurd length needs more.
-        var stride = 10_000
-        while let longest = parts.map(\.count).max(), longest > stride { stride *= 10 }
         var analysis = OfflineAnalysis(source: source, segments: [])
         for (passage, segments) in zip(passages, parts) {
             let start = analysis.segments.count
             analysis.segments += segments.map { segment in
                 var segment = segment
-                segment.id += passage.id * stride
+                segment.id = Self.id(of: segment.id, in: passage)
                 return segment
             }
             analysis.passages.append(AnalysedPassage(passage: passage, segments: start..<analysis.segments.count))
         }
         return analysis
+    }
+
+    /// The same for a passage whatever is analysed with it. Words past the ten thousandth (a Backend
+    /// may write a passage of any length) are numbered apart, so no two passages share an id.
+    private static func id(of position: Int, in passage: Passage) -> Int {
+        position < 10_000 ? passage.id * 10_000 + position : (passage.id + 1) * 1_000_000_000_000 + position
     }
 
     // MARK: - Tokenizing
