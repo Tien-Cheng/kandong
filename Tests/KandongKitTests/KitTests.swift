@@ -658,4 +658,56 @@ struct UnaskedBackend: AIBackend {
         #expect(try !decode(#"{"myLevel": 0}"#).hasChosenLevel)
         #expect(try decode("{}").readingTypeface == .kai)
     }
+
+    @Test func settingsFromBeforeTheLoginQuestion() throws {
+        let decode = { (data: Data) in try JSONDecoder().decode(AppSettings.self, from: data) }
+        #expect(try !decode(Data("{}".utf8)).hasAnsweredOpenAtLogin, "existing users are asked too")
+        var settings = AppSettings()
+        settings.hasAnsweredOpenAtLogin = true
+        #expect(try decode(JSONEncoder().encode(settings)).hasAnsweredOpenAtLogin)
+    }
+
+    @Test func asksAboutTheLevelUntilAnswered() {
+        var settings = AppSettings()
+        #expect(settings.asksAboutLevel)
+        settings.hasChosenLevel = true
+        #expect(!settings.asksAboutLevel, "Not now is an answer")
+        settings.hasChosenLevel = false
+        settings.myLevel = 2
+        #expect(!settings.asksAboutLevel)
+    }
+}
+
+@Suite struct AppLocationTests {
+    private func isInApplications(_ path: String) -> Bool {
+        AppLocation.isInApplications(URL(fileURLWithPath: path), home: URL(fileURLWithPath: "/Users/learner"))
+    }
+
+    @Test(arguments: ["/Applications/Kandong.app", "/Users/learner/Applications/Kandong.app", "/Applications/Study/Kandong.app"])
+    func opensAtLoginFromApplications(path: String) {
+        #expect(isInApplications(path))
+    }
+
+    @Test(arguments: [
+        "/Users/learner/Downloads/Kandong.app",
+        "/private/var/folders/ab/cd/T/AppTranslocation/0F1E/d/Kandong.app",
+        "/Users/learner/kandong/build/Kandong.app",
+        "/Users/learner/kandong/.build/debug",
+        "/Applications2/Kandong.app",
+        "/Users/someoneelse/Applications/Kandong.app",
+    ])
+    func notFromElsewhere(path: String) {
+        #expect(!isInApplications(path))
+    }
+
+    @Test func followsALinkedApplicationsFolder() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("kandong-home-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: home) }
+        let real = home.appendingPathComponent("Disk/Apps")
+        try FileManager.default.createDirectory(at: real.appendingPathComponent("Kandong.app"), withIntermediateDirectories: true)
+        let link = home.appendingPathComponent("Applications")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+        #expect(AppLocation.isInApplications(link.appendingPathComponent("Kandong.app"), home: home))
+        #expect(AppLocation.isInApplications(real.appendingPathComponent("Kandong.app"), home: home))
+    }
 }

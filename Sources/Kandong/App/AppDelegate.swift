@@ -24,8 +24,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setUpStatusItem()
         if Updater.isAvailable { updater = Updater() }
         if !Permissions.accessibilityGranted {
-            Permissions.requestAccessibility()
-            showMainWindow(tab: .settings)
+            // Opened at login, Kandong keeps quiet: the menu says what's missing.
+            if !LoginItem.launchedAtLogin {
+                Permissions.requestAccessibility()
+                showMainWindow(tab: .settings)
+            }
             relaunchWhenAccessibilityGranted()
         }
     }
@@ -124,6 +127,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 menu.addItem(menuItem("Restart to Update to \(version)", #selector(restartToUpdate)))
             }
             menu.addItem(menuItem("Check for Updates…", #selector(checkForUpdates)))
+        }
+        if !Permissions.accessibilityGranted {
+            menu.addItem(menuItem("⚠︎ Accessibility needed…", #selector(openSettings)))
         }
         if let error = model.dictionaryError {
             let warning = NSMenuItem(title: "⚠︎ " + error, action: nil, keyEquivalent: "")

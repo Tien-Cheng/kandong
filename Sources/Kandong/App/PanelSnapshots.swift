@@ -17,8 +17,10 @@ enum PanelSnapshots {
             settings.backends = [.appleIntelligence, .chatGPT, lmStudio]
             settings.myLevel = scenario.myLevel
             settings.hasChosenLevel = scenario.myLevel != 0
+            settings.hasAnsweredOpenAtLogin = !scenario.asksOpenAtLogin
             let workspace = FileManager.default.temporaryDirectory.appendingPathComponent("kandong-snapshot-\(UUID().uuidString)")
-            let model = AppModel(previewSettings: settings, workspacePath: workspace.path)
+            let loginItem = LoginItem(preview: .off, errorMessage: scenario.loginItemError)
+            let model = AppModel(previewSettings: settings, workspacePath: workspace.path, loginItem: loginItem)
             guard let engine = await model.readyEngine() else {
                 print("dictionary not loaded")
                 return
@@ -28,6 +30,7 @@ enum PanelSnapshots {
             session.backend = lmStudio
             session.backendLabel = "LM Studio · google/gemma-4-12b"
             session.backendIsLocal = true
+            session.mayAskOpenAtLogin = !settings.asksAboutLevel
             scenario.fill(session, engine)
             model.session = session
             controller.selectedWordID = scenario.selectWord.flatMap { word in session.analysis?.words.first { $0.text == word }?.id }
@@ -63,8 +66,17 @@ enum PanelSnapshots {
         var source: LookupSource = .selection
         var myLevel = 0
         var selectWord: String?
+        var asksOpenAtLogin = false
+        var loginItemError: String?
         var height: CGFloat = 640
         let fill: @MainActor (LookupSession, LookupEngine) -> Void
+    }
+
+    private static func openAtLogin(_ session: LookupSession, _ engine: LookupEngine) {
+        session.sourceText = "我们下周再讨论这个问题吧。"
+        session.analysis = engine.offline(session.sourceText)
+        session.translation = "Let's discuss this issue again next week."
+        session.status = .done
     }
 
     private static let scenarios: [Scenario] = [
@@ -87,6 +99,11 @@ enum PanelSnapshots {
             session.translation = "Can this feature ship tomorrow? The inference cost of multimodal large models has dropped by an order of magnitude. @张三 what do you think? https://example.com"
             session.status = .done
         },
+        Scenario(name: "open-at-login", myLevel: 2, asksOpenAtLogin: true, height: 480, fill: openAtLogin),
+        Scenario(name: "open-at-login-failed", myLevel: 2, asksOpenAtLogin: true,
+                 loginItemError: "The operation couldn’t be completed. Operation not permitted", height: 500, fill: openAtLogin),
+        // The question about My level comes first, alone.
+        Scenario(name: "level-before-open-at-login", asksOpenAtLogin: true, height: 480, fill: openAtLogin),
         Scenario(name: "reverse", height: 520) { session, engine in
             session.direction = .reverse
             session.sourceText = "I can't make it tonight, something came up at work."

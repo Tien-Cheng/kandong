@@ -32,6 +32,7 @@ final class AppModel {
     /// A technical-terms download under way, or why the last one failed.
     private(set) var addOnStatus: AddOnStatus?
     let history: HistoryStore
+    let loginItem: LoginItem
     var session: LookupSession?
     /// Last known readiness of each Backend, by id.
     private(set) var statuses: [String: BackendStatus] = [:]
@@ -68,6 +69,7 @@ final class AppModel {
 
     init() {
         isPreview = false
+        loginItem = LoginItem()
         let stored = UserDefaults.standard.data(forKey: "settings").flatMap { try? JSONDecoder().decode(AppSettings.self, from: $0) }
         settings = stored ?? AppSettings()
         workspace = Workspace(path: (stored ?? AppSettings()).workspacePath)
@@ -83,8 +85,9 @@ final class AppModel {
 
     /// A model that touches nothing outside itself, for rendering previews: `settings` as given, an
     /// empty Workspace in `workspacePath`, History in memory, no shortcuts.
-    init(previewSettings: AppSettings, workspacePath: String) {
+    init(previewSettings: AppSettings, workspacePath: String, loginItem: LoginItem? = nil) {
         isPreview = true
+        self.loginItem = loginItem ?? LoginItem(preview: .off)
         var settings = previewSettings
         settings.workspacePath = workspacePath
         self.settings = settings
@@ -127,6 +130,30 @@ final class AppModel {
 
     func workspaceDidChange() {
         workspaceRevision += 1
+    }
+
+    // MARK: Opening at login
+
+    /// Whether the panel asks, once, about opening at login. Never alongside the question about My
+    /// level: it waits for a Lookup started after that was answered.
+    func asksAboutOpenAtLogin(in session: LookupSession) -> Bool {
+        session.mayAskOpenAtLogin && !settings.hasAnsweredOpenAtLogin && loginItem.state == .off
+    }
+
+    /// The toggle in Settings, which also answers the panel's question.
+    func setOpenAtLogin(_ enabled: Bool) {
+        loginItem.setEnabled(enabled)
+        settings.hasAnsweredOpenAtLogin = true
+    }
+
+    /// The panel's question. It stays, with the reason, if macOS refuses.
+    func answerOpenAtLogin(_ enabled: Bool) {
+        if enabled {
+            loginItem.setEnabled(true)
+            if loginItem.state == .blocked { loginItem.openSystemSettings() }
+            guard loginItem.state != .off else { return }
+        }
+        settings.hasAnsweredOpenAtLogin = true
     }
 
     // MARK: Dictionary
@@ -549,6 +576,11 @@ final class AppModel {
         session.backend = config
         session.backendLabel = backend(for: config).label
         session.backendIsLocal = config.isOnDevice
+        session.mayAskOpenAtLogin = !settings.asksAboutLevel
+        if !settings.hasAnsweredOpenAtLogin {
+            loginItem.refresh()
+            loginItem.errorMessage = nil
+        }
         self.session = session
         return session
     }

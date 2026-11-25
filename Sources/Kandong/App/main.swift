@@ -13,6 +13,15 @@ MainActor.assumeIsolated {
         }
         app.run()
     }
+    if let flag = CommandLine.arguments.firstIndex(of: "--render-settings") {
+        let folder = CommandLine.arguments.dropFirst(flag + 1).first ?? "settings-snapshots"
+        app.setActivationPolicy(.prohibited)
+        Task { @MainActor in
+            await SettingsSnapshots.render(to: URL(fileURLWithPath: folder))
+            exit(0)
+        }
+        app.run()
+    }
     if let flag = CommandLine.arguments.firstIndex(of: "--render-panel") {
         // Renders the Result panel to PNGs and quits: no window, status item or shortcuts.
         let folder = CommandLine.arguments.dropFirst(flag + 1).first ?? "panel-snapshots"
