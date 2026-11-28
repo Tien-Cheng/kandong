@@ -35,6 +35,8 @@ public struct AIRequest: Sendable {
 public enum FixAction: Equatable, Sendable {
     /// Opens Kandong's ChatGPT connection flow; no terminal setup is needed.
     case connectChatGPT
+    /// Opens Kandong's OpenRouter browser PKCE sign-in flow for a specific OpenRouter Backend.
+    case connectOpenRouter(backendID: String)
     case openURL(URL, label: String)
     /// A command to paste into Terminal.
     case copyCommand(String, label: String)
@@ -43,6 +45,7 @@ public enum FixAction: Equatable, Sendable {
     public var label: String {
         switch self {
         case .connectChatGPT: "Continue with ChatGPT"
+        case .connectOpenRouter: "Sign in with OpenRouter"
         case .openURL(_, let label), .copyCommand(_, let label), .openApp(_, let label): label
         }
     }

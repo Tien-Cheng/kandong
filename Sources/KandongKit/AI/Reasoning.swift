@@ -34,6 +34,8 @@ public enum Reasoning {
     public static let levels = ["off", "minimal", "low", "medium", "high", "xhigh", "on"]
     /// What any OpenAI-compatible server may accept.
     public static let openAILevels = ["off", "minimal", "low", "medium", "high"]
+    /// Thinking / effort levels offered by Anthropic's Messages API.
+    public static let anthropicLevels = ["off", "low", "medium", "high", "max"]
 
     public static func displayName(_ level: String) -> String {
         switch level {

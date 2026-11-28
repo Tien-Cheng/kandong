@@ -49,6 +49,11 @@ final class AppModel {
         let store: any ChatGPTCredentialStore = isPreview ? PreviewChatGPTCredentialStore() : MacChatGPTCredentialStore()
         return ChatGPTSession(store: store)
     }()
+    private(set) var openRouterConnectingBackendID: String?
+    private(set) var openRouterMessages: [String: String] = [:]
+    private(set) var openRouterKeyVersion: [String: Int] = [:]
+    @ObservationIgnored private var openRouterAuthorization: Task<Void, Never>?
+    @ObservationIgnored private lazy var openRouterAuth = OpenRouterAuth()
     /// The models Kandong recommends for LM Studio; the bundled list until the latest is fetched.
     private(set) var modelCatalog = LocalModelCatalog.bundled
     @ObservationIgnored private var catalogLoaded = false
@@ -254,6 +259,7 @@ final class AppModel {
         case .appleIntelligence: AppleIntelligenceBackend(readingMode: config.readingMode)
         case .chatGPT: ChatGPTBackend(settings: settings.chatGPT, session: chatGPTSession,
                                     readingMode: config.readingMode, state: chatGPTBackendState)
+        case .anthropic: AnthropicBackend(config: config, apiKey: Keychain.read(config.keychainAccount))
         case .openAICompatible: OpenAICompatibleBackend(config: config, apiKey: Keychain.read(config.keychainAccount))
         }
     }
@@ -332,13 +338,82 @@ final class AppModel {
     }
 
     #if DEBUG
+    private(set) var previewConnectedBackendIDs: Set<String> = []
+    private(set) var previewAnthropicModels: [AnthropicModel] = []
+
     func prepareChatGPTPreview(accounts: [ChatGPTAccount], status: BackendStatus, connecting: Bool = false) {
         guard isPreview else { return }
         chatGPTAccounts = accounts
         statuses[BackendConfig.chatGPT.id] = status
         chatGPTConnecting = connecting
     }
+
+    func prepareProviderPreview(
+        statuses: [String: BackendStatus],
+        connectedIDs: Set<String> = [],
+        openRouterConnectingID: String? = nil,
+        openRouterMessages: [String: String] = [:],
+        anthropicModels: [AnthropicModel] = []
+    ) {
+        guard isPreview else { return }
+        self.statuses = statuses
+        self.previewConnectedBackendIDs = connectedIDs
+        self.openRouterConnectingBackendID = openRouterConnectingID
+        self.openRouterMessages = openRouterMessages
+        self.previewAnthropicModels = anthropicModels
+    }
     #endif
+
+    // MARK: OpenRouter OAuth PKCE
+
+    func connectOpenRouter(backendID: String) {
+        guard !isPreview, openRouterConnectingBackendID == nil,
+              let config = settings.backend(id: backendID),
+              config.type == .openAICompatible, config.preset == .openRouter else { return }
+        openRouterConnectingBackendID = backendID
+        openRouterMessages[backendID] = ""
+        openRouterAuthorization = Task {
+            defer {
+                if openRouterConnectingBackendID == backendID { openRouterConnectingBackendID = nil }
+                openRouterAuthorization = nil
+            }
+            do {
+                let key = try await openRouterAuth.authorize { url in
+                    let opened = await MainActor.run { NSWorkspace.shared.open(url) }
+                    guard opened else {
+                        throw OpenRouterAuthError.unavailable("Couldn't open your browser. Try Sign in with OpenRouter again.")
+                    }
+                }
+                try Task.checkCancellation()
+                guard let current = settings.backend(id: backendID) else { return }
+                guard Keychain.write(key, for: current.keychainAccount) else {
+                    openRouterMessages[backendID] = "Couldn't save the OpenRouter key in your login Keychain. Unlock it and try again."
+                    return
+                }
+                openRouterKeyVersion[backendID, default: 0] += 1
+                openRouterMessages[backendID] = ""
+                await refreshStatuses(only: backendID)
+            } catch is CancellationError {
+                openRouterMessages[backendID] = "Sign-in cancelled."
+            } catch {
+                openRouterMessages[backendID] = error.localizedDescription
+            }
+        }
+    }
+
+    func cancelOpenRouterConnection() {
+        openRouterAuthorization?.cancel()
+        Task { await openRouterAuth.cancelAuthorization() }
+    }
+
+    func disconnectOpenRouter(backendID: String) {
+        guard !isPreview, openRouterConnectingBackendID != backendID,
+              let config = settings.backend(id: backendID) else { return }
+        Keychain.write("", for: config.keychainAccount)
+        openRouterKeyVersion[backendID, default: 0] += 1
+        openRouterMessages[backendID] = ""
+        Task { await refreshStatuses(only: backendID) }
+    }
 
     // MARK: Local models
 
@@ -457,10 +532,19 @@ final class AppModel {
         return config
     }
 
+    func addAnthropicBackend() -> BackendConfig {
+        let config = BackendConfig.anthropic()
+        settings.backends.append(config)
+        return config
+    }
+
     func removeBackend(_ config: BackendConfig) {
+        if openRouterConnectingBackendID == config.id { cancelOpenRouterConnection() }
         Keychain.write("", for: config.keychainAccount)
         settings.removeBackend(id: config.id)
         statuses[config.id] = nil
+        openRouterMessages[config.id] = nil
+        openRouterKeyVersion[config.id] = nil
     }
 
     /// A fix's button title, e.g. "Get LM Studio" when the app it would open isn't installed.
@@ -478,6 +562,9 @@ final class AppModel {
         case .connectChatGPT:
             AppDelegate.shared?.showMainWindow(tab: .ai)
             connectChatGPT(accountID: settings.chatGPT.accountID)
+        case .connectOpenRouter(let backendID):
+            AppDelegate.shared?.showMainWindow(tab: .ai)
+            connectOpenRouter(backendID: backendID)
         case .openURL(let url, _):
             NSWorkspace.shared.open(url)
         case .copyCommand(let command, _):

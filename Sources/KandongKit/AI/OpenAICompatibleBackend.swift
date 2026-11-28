@@ -5,17 +5,22 @@ public struct OpenAICompatibleBackend: AIBackend {
     public let config: BackendConfig
     public let settings: OpenAISettings
     public let apiKey: String?
+    private let urlSession: URLSession
     /// Overrides `deadline(for:)`, for tests.
     var timeLimit: Int?
 
-    public init(config: BackendConfig, apiKey: String? = nil) {
+    public init(config: BackendConfig, apiKey: String? = nil, urlSession: URLSession = .shared) {
         self.config = config
         self.settings = config.openAI ?? OpenAISettings(baseURL: (config.preset ?? .other).baseURL)
         self.apiKey = apiKey
+        self.urlSession = urlSession
     }
 
     private var name: String { config.name }
     private var isLMStudio: Bool { config.isLMStudio }
+    private var isOpenRouter: Bool {
+        config.preset == .openRouter && URL(string: baseURL)?.host?.lowercased() == "openrouter.ai"
+    }
 
     public var label: String {
         settings.model.isEmpty ? name : "\(name) · \(settings.model)"
@@ -29,16 +34,26 @@ public struct OpenAICompatibleBackend: AIBackend {
 
     public func status() async -> BackendStatus {
         if config.preset?.needsKey == true, apiKey?.isEmpty ?? true {
+            if isOpenRouter {
+                return .needsSetup("Sign in with OpenRouter or add an API key.", fix: .connectOpenRouter(backendID: config.id))
+            }
             return .needsSetup("Add your \(config.preset?.displayName ?? name) API key.")
         }
         // Ask the server even when a model is configured, so a stopped server or a bad key shows up.
         do {
+            // OpenRouter's /models endpoint is public and returns 200 even with an invalid key, so validate via /key first.
+            if isOpenRouter, let apiKey, !apiKey.isEmpty {
+                _ = try await OpenRouterAuth.keyInfo(apiKey: apiKey, baseURL: baseURL, urlSession: urlSession)
+            }
             let models = try await availableModels()
             guard let model = settings.model.isEmpty ? models.first : settings.model else {
                 return .needsSetup(isLMStudio ? "LM Studio has no models yet. Download one in LM Studio." : "\(name) lists no models. Set a model name.")
             }
             return .ready(config.isOnDevice ? "On this Mac · \(model)" : model)
         } catch BackendError.http(let status, _) where status == 401 || status == 403 {
+            if isOpenRouter {
+                return .needsSetup("\(name) rejected the API key.", fix: .connectOpenRouter(backendID: config.id))
+            }
             return .needsSetup("\(name) rejected the API key.")
         } catch {
             if isLMStudio {
@@ -51,16 +66,20 @@ public struct OpenAICompatibleBackend: AIBackend {
     /// The model ids the server offers (LM Studio: chat models, loaded ones first).
     func availableModels() async throws -> [String] {
         if isLMStudio { return try await LMStudio.models(baseURL: baseURL).map(\.id) }
+        return try await rawModelEntries().compactMap { $0["id"]?.string }
+    }
+
+    private func rawModelEntries() async throws -> [JSONValue] {
         guard let url = URL(string: baseURL + "/models") else {
             throw BackendError.serverUnavailable(name: name, url: baseURL, hint: "Check the server URL in Settings.")
         }
         var request = URLRequest(url: url)
         request.timeoutInterval = 5
         if let apiKey, !apiKey.isEmpty { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await urlSession.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 200
         guard (200..<300).contains(status) else { throw BackendError.http(status: status, body: String(decoding: data, as: UTF8.self)) }
-        return (try? JSONValue.decode(data))?["data"]?.array?.compactMap { $0["id"]?.string } ?? []
+        return (try? JSONValue.decode(data))?["data"]?.array ?? []
     }
 
     public func supportsImages() async -> Bool {
@@ -68,9 +87,18 @@ public struct OpenAICompatibleBackend: AIBackend {
         case .yes: return true
         case .no: return false
         case .auto:
-            guard isLMStudio, let models = try? await LMStudio.models(baseURL: baseURL) else { return false }
-            let model = try? await resolveModel(lmStudioModels: models)
-            return models.first { $0.id == model }?.canReadImages ?? false
+            if isLMStudio {
+                guard let models = try? await LMStudio.models(baseURL: baseURL) else { return false }
+                let model = try? await resolveModel(lmStudioModels: models)
+                return models.first { $0.id == model }?.canReadImages ?? false
+            }
+            if isOpenRouter {
+                guard let entries = try? await rawModelEntries() else { return false }
+                let resolved = settings.model.isEmpty ? entries.first?["id"]?.string : settings.model
+                guard let entry = entries.first(where: { $0["id"]?.string == resolved }) else { return false }
+                return entry["architecture"]?["input_modalities"]?.array?.contains(.string("image")) ?? false
+            }
+            return false
         }
     }
 
@@ -91,7 +119,7 @@ public struct OpenAICompatibleBackend: AIBackend {
         var request = URLRequest(url: url)
         request.timeoutInterval = 5
         if let apiKey, !apiKey.isEmpty { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
-        guard let (data, _) = try? await URLSession.shared.data(for: request) else {
+        guard let (data, _) = try? await urlSession.data(for: request) else {
             throw BackendError.serverUnavailable(name: name, url: baseURL, hint: "Is the server running?")
         }
         guard let id = (try? JSONValue.decode(data))?["data"]?.array?.first?["id"]?.string else {
@@ -236,11 +264,15 @@ public struct OpenAICompatibleBackend: AIBackend {
         urlRequest.timeoutInterval = 300
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let apiKey, !apiKey.isEmpty { urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
+        if isOpenRouter {
+            urlRequest.setValue(OpenRouterAuth.referer, forHTTPHeaderField: "HTTP-Referer")
+            urlRequest.setValue(OpenRouterAuth.appTitle, forHTTPHeaderField: "X-Title")
+        }
         urlRequest.httpBody = try JSONValue.object(body).encoded()
 
         let bytes: URLSession.AsyncBytes, response: URLResponse
         do {
-            (bytes, response) = try await URLSession.shared.bytes(for: urlRequest)
+            (bytes, response) = try await urlSession.bytes(for: urlRequest)
         } catch {
             let hint = isLMStudio ? LMStudio.startHint : "Is the server running?"
             throw BackendError.serverUnavailable(name: name, url: baseURL, hint: hint)

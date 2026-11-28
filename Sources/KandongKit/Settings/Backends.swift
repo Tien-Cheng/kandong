@@ -4,6 +4,7 @@ import Foundation
 public enum BackendType: String, Codable, Sendable {
     case appleIntelligence
     case chatGPT
+    case anthropic
     case openAICompatible
 }
 
@@ -74,20 +75,28 @@ public struct BackendConfig: Codable, Hashable, Sendable, Identifiable {
     /// For OpenAI-compatible Backends: what they were set up as.
     public var preset: OpenAIPreset?
     public var openAI: OpenAISettings?
+    public var anthropic: AnthropicSettings?
     /// The user's choice; nil follows `defaultReadingMode`, which may change with the Backend's URL or
     /// a later release.
     public var readingModeSetting: ReadingMode?
 
-    public init(id: String, name: String, type: BackendType, preset: OpenAIPreset? = nil, openAI: OpenAISettings? = nil) {
+    public init(id: String, name: String, type: BackendType, preset: OpenAIPreset? = nil,
+                openAI: OpenAISettings? = nil, anthropic: AnthropicSettings? = nil) {
         self.id = id
         self.name = name
         self.type = type
         self.preset = preset
         self.openAI = openAI
+        self.anthropic = anthropic
     }
 
     public static let appleIntelligence = BackendConfig(id: "apple-intelligence", name: "Apple Intelligence", type: .appleIntelligence)
     public static let chatGPT = BackendConfig(id: "chatgpt", name: "ChatGPT", type: .chatGPT)
+
+    /// A new native Claude (Anthropic Messages API) Backend.
+    public static func anthropic(id: String = UUID().uuidString.lowercased(), name: String = "Claude") -> BackendConfig {
+        BackendConfig(id: id, name: name, type: .anthropic, anthropic: AnthropicSettings())
+    }
 
     /// A new OpenAI-compatible Backend from a preset.
     public static func openAI(_ preset: OpenAIPreset, id: String = UUID().uuidString.lowercased(), name: String? = nil) -> BackendConfig {
@@ -96,7 +105,7 @@ public struct BackendConfig: Codable, Hashable, Sendable, Identifiable {
     }
 
     /// Apple Intelligence and ChatGPT are always there; the user adds and removes the rest.
-    public var isBuiltIn: Bool { type != .openAICompatible }
+    public var isBuiltIn: Bool { type == .appleIntelligence || type == .chatGPT }
 
     public var isLMStudio: Bool { preset == .lmStudio }
 
@@ -114,14 +123,28 @@ public struct BackendConfig: Codable, Hashable, Sendable, Identifiable {
         switch type {
         case .appleIntelligence: .choose
         case .chatGPT: .free
-        case .openAICompatible: isOnDevice ? .choose : .free
+        case .anthropic, .openAICompatible: isOnDevice ? .choose : .free
         }
     }
 
-    /// How much an OpenAI-compatible Backend's model thinks per task.
+    /// How much an OpenAI-compatible or Anthropic Backend's model thinks per task.
     public var reasoning: ReasoningSettings {
-        get { openAI?.reasoning ?? (preset ?? .other).defaultReasoning }
-        set { openAI?.reasoning = newValue }
+        get {
+            switch type {
+            case .anthropic: anthropic?.reasoning ?? .modelDefault
+            default: openAI?.reasoning ?? (preset ?? .other).defaultReasoning
+            }
+        }
+        set {
+            switch type {
+            case .anthropic:
+                var current = anthropic ?? AnthropicSettings()
+                current.reasoning = newValue
+                anthropic = current
+            default:
+                openAI?.reasoning = newValue
+            }
+        }
     }
 
     /// Where its API key is kept in the Keychain.
@@ -132,6 +155,9 @@ public struct BackendConfig: Codable, Hashable, Sendable, Identifiable {
         switch type {
         case .appleIntelligence: return true
         case .chatGPT: return false
+        case .anthropic:
+            guard let host = anthropic.flatMap({ URL(string: $0.baseURL) })?.host else { return false }
+            return ["localhost", "127.0.0.1", "::1", "[::1]"].contains(host)
         case .openAICompatible:
             guard let host = openAI.flatMap({ URL(string: $0.baseURL) })?.host else { return false }
             return ["localhost", "127.0.0.1", "::1", "[::1]"].contains(host)
@@ -143,7 +169,7 @@ public struct BackendConfig: Codable, Hashable, Sendable, Identifiable {
 public let legacyKeychainAccounts: [(from: String, to: String)] = [("custom-api-key", "api-key-custom")]
 
 extension BackendConfig {
-    private enum CodingKeys: String, CodingKey { case id, name, type, preset, openAI, readingModeSetting }
+    private enum CodingKeys: String, CodingKey { case id, name, type, preset, openAI, anthropic, readingModeSetting }
 
     // A reading mode this version doesn't know (from a newer one) falls back to the default rather
     // than losing the Backend.
@@ -159,6 +185,7 @@ extension BackendConfig {
         type = try c.decode(BackendType.self, forKey: .type)
         preset = try c.decodeIfPresent(OpenAIPreset.self, forKey: .preset)
         openAI = try c.decodeIfPresent(OpenAISettings.self, forKey: .openAI)
+        anthropic = try c.decodeIfPresent(AnthropicSettings.self, forKey: .anthropic)
         readingModeSetting = (try? c.decodeIfPresent(String.self, forKey: .readingModeSetting)).flatMap { $0.flatMap(ReadingMode.init(rawValue:)) }
     }
 }
