@@ -453,9 +453,9 @@ private struct AnthropicFields: View {
     @Bindable var model: AppModel
     @Binding var config: BackendConfig
     @ViewState private var apiKey = ""
-    @ViewState private var models: [AnthropicModel] = []
-    @ViewState private var loadingModels = false
-    @ViewState private var modelError = ""
+    @ViewState private var loadedBackendID = ""
+    @ViewState private var catalog = AnthropicModelCatalogState()
+    @ViewState private var fetchTask: Task<Void, Never>?
     @ViewState private var showAdvanced = false
 
     private var settings: Binding<AnthropicSettings> {
@@ -476,7 +476,7 @@ private struct AnthropicFields: View {
         #if DEBUG
         if model.isPreview { return model.previewAnthropicModels }
         #endif
-        return models
+        return catalog.models
     }
 
     private var selectedModel: AnthropicModel? {
@@ -485,98 +485,125 @@ private struct AnthropicFields: View {
     }
 
     private var thinkingOptions: [String] {
-        if selectedModel?.thinking.canDisableThinking == false {
-            return [""] + Reasoning.anthropicLevels.filter { $0 != "off" }
-        }
-        return [""] + Reasoning.anthropicLevels
+        selectedModel?.allowedThinkingLevels ?? ([""] + Reasoning.anthropicLevels)
     }
 
     private var thinkingNote: String? {
         guard let selectedModel, !selectedModel.thinking.canDisableThinking else { return nil }
-        return "\(selectedModel.displayName) doesn't support turning thinking off."
+        let fallback = Reasoning.displayName(selectedModel.resolvedThinkingLevel(for: "off"))
+        return "\(selectedModel.displayName) doesn't support turning thinking off; Off uses \(fallback)."
     }
 
     var body: some View {
-        TextField("Name", text: $config.name)
-        SecureField("API key", text: $apiKey, prompt: Text("sk-ant-…"))
-            .onChange(of: apiKey) {
-                guard !model.isPreview else { return }
-                let id = config.id
-                Keychain.write(apiKey, for: config.keychainAccount)
-                Task {
-                    await refreshModels()
-                    await model.refreshStatuses(only: id)
-                }
-            }
-        Picker("Model", selection: settings.model) {
-            Text(loadingModels ? "Loading models…" : "First available model").tag("")
-            ForEach(displayedModels) { Text($0.displayName).tag($0.id) }
-            if !settings.wrappedValue.model.isEmpty,
-               !displayedModels.contains(where: { $0.id == settings.wrappedValue.model }) {
-                Text(settings.wrappedValue.model).tag(settings.wrappedValue.model)
-            }
-        }
-        .disabled(loadingModels || !hasKey)
-        if !modelError.isEmpty {
-            Text(modelError).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-        }
-        ThinkingPicker(title: "Thinking when translating", level: settings.reasoning.translate,
-                       options: thinkingOptions)
-        ThinkingPicker(title: "Thinking when explaining", level: settings.reasoning.explain,
-                       options: thinkingOptions)
-        if let thinkingNote {
-            Text(thinkingNote).font(.caption).foregroundStyle(.secondary)
-        }
-        Picker("Reads images", selection: settings.vision) {
-            Text("Detect (uses on-device OCR if unknown)").tag(VisionSupport.auto)
-            Text("Yes").tag(VisionSupport.yes)
-            Text("No — use on-device OCR").tag(VisionSupport.no)
-        }
-        DisclosureGroup("Advanced", isExpanded: $showAdvanced) {
-            TextField("Server URL", text: settings.baseURL)
-                .onSubmit {
-                    guard !model.isPreview else { return }
+        Group {
+            TextField("Name", text: $config.name)
+            SecureField("API key", text: $apiKey, prompt: Text("sk-ant-…"))
+                .onChange(of: apiKey) {
+                    guard !model.isPreview, loadedBackendID == config.id else { return }
                     let id = config.id
-                    Task {
-                        await refreshModels()
-                        await model.refreshStatuses(only: id)
-                    }
+                    Keychain.write(apiKey, for: config.keychainAccount)
+                    startModelRefresh()
+                    Task { await model.refreshStatuses(only: id) }
                 }
+            Picker("Model", selection: settings.model) {
+                Text(catalog.isLoading ? "Loading models…" : "First available model").tag("")
+                ForEach(displayedModels) { Text($0.displayName).tag($0.id) }
+                if !settings.wrappedValue.model.isEmpty,
+                   !displayedModels.contains(where: { $0.id == settings.wrappedValue.model }) {
+                    Text(settings.wrappedValue.model).tag(settings.wrappedValue.model)
+                }
+            }
+            .disabled(catalog.isLoading || !hasKey)
+            if !catalog.error.isEmpty {
+                Text(catalog.error).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+            ThinkingPicker(title: "Thinking when translating", level: settings.reasoning.translate,
+                           options: thinkingOptions)
+            ThinkingPicker(title: "Thinking when explaining", level: settings.reasoning.explain,
+                           options: thinkingOptions)
+            if let thinkingNote {
+                Text(thinkingNote).font(.caption).foregroundStyle(.secondary)
+            }
+            Picker("Reads images", selection: settings.vision) {
+                Text("Detect (uses on-device OCR if unknown)").tag(VisionSupport.auto)
+                Text("Yes").tag(VisionSupport.yes)
+                Text("No — use on-device OCR").tag(VisionSupport.no)
+            }
+            DisclosureGroup("Advanced", isExpanded: $showAdvanced) {
+                TextField("Server URL", text: settings.baseURL)
+                    .onChange(of: settings.wrappedValue.baseURL) {
+                        guard !model.isPreview else { return }
+                        fetchTask?.cancel()
+                        fetchTask = nil
+                        catalog.invalidate(clearResults: true)
+                    }
+                    .onSubmit {
+                        guard !model.isPreview else { return }
+                        let id = config.id
+                        startModelRefresh()
+                        Task { await model.refreshStatuses(only: id) }
+                    }
+            }
+            HStack {
+                Link("Anthropic Console", destination: AnthropicBackend.consoleKeysURL)
+                Spacer()
+                Button("Reload Models") { startModelRefresh() }
+                    .disabled(catalog.isLoading || !hasKey)
+            }
         }
-        HStack {
-            Link("Anthropic Console", destination: AnthropicBackend.consoleKeysURL)
-            Spacer()
-            Button("Reload Models") { Task { await refreshModels() } }
-                .disabled(loadingModels || !hasKey)
-        }
-        .task {
+        .task(id: config.id) {
+            fetchTask?.cancel()
+            fetchTask = nil
+            loadedBackendID = ""
+            catalog.invalidate(clearResults: true)
             guard !model.isPreview else {
                 #if DEBUG
                 if model.previewConnectedBackendIDs.contains(config.id) { apiKey = "sk-ant-preview" }
                 #endif
+                loadedBackendID = config.id
                 return
             }
             apiKey = Keychain.read(config.keychainAccount) ?? ""
-            await refreshModels()
+            loadedBackendID = config.id
+            startModelRefresh()
+        }
+        .onDisappear {
+            fetchTask?.cancel()
+            fetchTask = nil
+            catalog.invalidate()
         }
     }
 
-    private func refreshModels() async {
+    private func startModelRefresh() {
         guard !model.isPreview else { return }
-        let id = config.id
-        models = []
-        modelError = ""
-        guard !apiKey.isEmpty else { return }
-        loadingModels = true
-        defer { loadingModels = false }
-        do {
-            let backend = AnthropicBackend(config: config, apiKey: apiKey)
-            let fetched = try await backend.models()
-            guard id == config.id else { return }
-            models = fetched
-        } catch {
-            guard id == config.id else { return }
-            modelError = error.localizedDescription
+        fetchTask?.cancel()
+        fetchTask = nil
+        let key = AnthropicModelFetchKey(
+            backendID: config.id,
+            baseURL: settings.wrappedValue.baseURL,
+            apiKey: apiKey
+        )
+        guard let generation = catalog.beginFetch(for: key) else { return }
+        let snapshotConfig = config
+        fetchTask = Task {
+            let result: Result<[AnthropicModel], Error>
+            do {
+                let backend = AnthropicBackend(config: snapshotConfig, apiKey: key.apiKey)
+                let fetched = try await backend.models()
+                result = .success(fetched)
+            } catch is CancellationError {
+                return
+            } catch {
+                result = .failure(error)
+            }
+            guard !Task.isCancelled else { return }
+            let currentKey = AnthropicModelFetchKey(
+                backendID: config.id,
+                baseURL: settings.wrappedValue.baseURL,
+                apiKey: apiKey
+            )
+            guard currentKey == key else { return }
+            _ = catalog.finish(generation: generation, key: key, result: result)
         }
     }
 }

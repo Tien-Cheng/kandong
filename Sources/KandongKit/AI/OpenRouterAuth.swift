@@ -45,6 +45,82 @@ public struct OpenRouterKeyInfo: Codable, Equatable, Sendable {
     }
 }
 
+/// Pure attempt-scoped state for OpenRouter browser sign-in so cancelled or superseded attempts
+/// cannot persist credentials, clear a newer sign-in's connecting state, or overwrite its messages.
+public struct OpenRouterSignInState: Equatable, Sendable {
+    public private(set) var activeAttemptID: UUID?
+    public private(set) var connectingBackendID: String?
+    public private(set) var messages: [String: String] = [:]
+    public private(set) var keyVersion: [String: Int] = [:]
+
+    public init() {}
+
+    /// Starts a new sign-in attempt for `backendID`, returning its unique attempt ID or `nil` if another sign-in is active.
+    public mutating func begin(backendID: String) -> UUID? {
+        guard activeAttemptID == nil else { return nil }
+        let id = UUID()
+        activeAttemptID = id
+        connectingBackendID = backendID
+        messages[backendID] = ""
+        return id
+    }
+
+    /// Synchronously cancels the active attempt so its commit hook and teardown become no-ops.
+    @discardableResult
+    public mutating func cancel() -> String? {
+        let backendID = connectingBackendID
+        activeAttemptID = nil
+        connectingBackendID = nil
+        if let backendID {
+            messages[backendID] = "Sign-in cancelled."
+        }
+        return backendID
+    }
+
+    /// True only while `attemptID` is still the current, uncancelled attempt for `backendID`.
+    public func canCommit(attemptID: UUID, backendID: String, isCancelled: Bool) -> Bool {
+        !isCancelled && activeAttemptID == attemptID && connectingBackendID == backendID
+    }
+
+    /// Marks `attemptID` complete if it is still the active attempt.
+    @discardableResult
+    public mutating func succeed(attemptID: UUID, backendID: String) -> Bool {
+        guard activeAttemptID == attemptID, connectingBackendID == backendID else { return false }
+        activeAttemptID = nil
+        connectingBackendID = nil
+        keyVersion[backendID, default: 0] += 1
+        messages[backendID] = ""
+        return true
+    }
+
+    /// Marks `attemptID` failed if it is still the active attempt.
+    @discardableResult
+    public mutating func fail(attemptID: UUID, backendID: String, message: String) -> Bool {
+        guard activeAttemptID == attemptID, connectingBackendID == backendID else { return false }
+        activeAttemptID = nil
+        connectingBackendID = nil
+        messages[backendID] = message
+        return true
+    }
+
+    public mutating func setMessage(_ message: String, for backendID: String) {
+        messages[backendID] = message
+    }
+
+    public mutating func bumpKeyVersion(for backendID: String) {
+        keyVersion[backendID, default: 0] += 1
+    }
+
+    public mutating func removeBackend(_ backendID: String) {
+        if connectingBackendID == backendID {
+            activeAttemptID = nil
+            connectingBackendID = nil
+        }
+        messages[backendID] = nil
+        keyVersion[backendID] = nil
+    }
+}
+
 /// Official OpenRouter OAuth PKCE flow for desktop apps (`https://openrouter.ai/docs/guides/overview/auth/oauth`).
 public actor OpenRouterAuth {
     public static let authURL = URL(string: "https://openrouter.ai/auth")!
@@ -93,20 +169,36 @@ public actor OpenRouterAuth {
     }
 
     /// Verifies that the target backend points to the official HTTPS OpenRouter origin both before launching
-    /// browser sign-in and immediately before persisting the exchanged key.
+    /// browser sign-in and immediately before persisting the exchanged key, keeping the same attempt guard
+    /// active through commit so cancelled or superseded attempts cannot persist credentials.
     public func authorizeAndSave(
         currentBaseURL: @escaping @Sendable () async -> String?,
         saveKey: @escaping @Sendable (String) async throws -> Void,
         openBrowser: @escaping @Sendable (URL) async throws -> Void
     ) async throws {
+        cancelAuthorization()
+        let attemptID = UUID()
+        let startedAt = now()
+        authorizationID = attemptID
+        defer {
+            if authorizationID == attemptID {
+                authorizationID = nil
+                callbackListener?.cancel()
+                callbackListener = nil
+            }
+        }
         guard let initialURL = await currentBaseURL(), Self.isOfficialOrigin(initialURL) else {
             throw OpenRouterAuthError.untrustedOrigin
         }
-        let key = try await authorize(openBrowser: openBrowser)
+        try checkAttempt(attemptID, startedAt: startedAt)
+        let key = try await runAuthorization(attemptID: attemptID, startedAt: startedAt, openBrowser: openBrowser)
+        try checkAttempt(attemptID, startedAt: startedAt)
         guard let finalURL = await currentBaseURL(), Self.isOfficialOrigin(finalURL) else {
             throw OpenRouterAuthError.untrustedOrigin
         }
+        try checkAttempt(attemptID, startedAt: startedAt)
         try await saveKey(key)
+        try checkAttempt(attemptID, startedAt: startedAt)
     }
 
     /// Starts the local loopback listener, opens the browser for OpenRouter PKCE approval, and exchanges the code for a scoped API key.
@@ -115,6 +207,23 @@ public actor OpenRouterAuth {
     ) async throws -> String {
         cancelAuthorization()
         let attemptID = UUID()
+        let startedAt = now()
+        authorizationID = attemptID
+        defer {
+            if authorizationID == attemptID {
+                authorizationID = nil
+                callbackListener?.cancel()
+                callbackListener = nil
+            }
+        }
+        return try await runAuthorization(attemptID: attemptID, startedAt: startedAt, openBrowser: openBrowser)
+    }
+
+    private func runAuthorization(
+        attemptID: UUID,
+        startedAt: Date,
+        openBrowser: @escaping @Sendable (URL) async throws -> Void
+    ) async throws -> String {
         let verifier: String
         let callbackNonce: String
         let listener: OAuthLoopbackListener
@@ -126,17 +235,14 @@ public actor OpenRouterAuth {
         } catch let error as OAuthLoopbackError {
             throw Self.mapLoopbackError(error)
         }
-        authorizationID = attemptID
         callbackListener = listener
         defer {
             listener.cancel()
             if authorizationID == attemptID {
-                authorizationID = nil
                 callbackListener = nil
             }
         }
 
-        let startedAt = now()
         let challenge = OAuthPKCE.codeChallenge(for: verifier)
         var components = URLComponents(url: authEndpoint, resolvingAgainstBaseURL: false)!
         components.queryItems = [

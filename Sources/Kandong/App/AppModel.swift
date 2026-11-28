@@ -49,9 +49,10 @@ final class AppModel {
         let store: any ChatGPTCredentialStore = isPreview ? PreviewChatGPTCredentialStore() : MacChatGPTCredentialStore()
         return ChatGPTSession(store: store)
     }()
-    private(set) var openRouterConnectingBackendID: String?
-    private(set) var openRouterMessages: [String: String] = [:]
-    private(set) var openRouterKeyVersion: [String: Int] = [:]
+    private(set) var openRouterSignIn = OpenRouterSignInState()
+    var openRouterConnectingBackendID: String? { openRouterSignIn.connectingBackendID }
+    var openRouterMessages: [String: String] { openRouterSignIn.messages }
+    var openRouterKeyVersion: [String: Int] { openRouterSignIn.keyVersion }
     @ObservationIgnored private var openRouterAuthorization: Task<Void, Never>?
     @ObservationIgnored private lazy var openRouterAuth = OpenRouterAuth()
     /// The models Kandong recommends for LM Studio; the bundled list until the latest is fetched.
@@ -379,8 +380,9 @@ final class AppModel {
         guard isPreview else { return }
         self.statuses = statuses
         self.previewConnectedBackendIDs = connectedIDs
-        self.openRouterConnectingBackendID = openRouterConnectingID
-        self.openRouterMessages = openRouterMessages
+        self.openRouterSignIn = OpenRouterSignInState()
+        if let openRouterConnectingID { _ = self.openRouterSignIn.begin(backendID: openRouterConnectingID) }
+        for (id, message) in openRouterMessages { self.openRouterSignIn.setMessage(message, for: id) }
         self.previewAnthropicModels = anthropicModels
     }
     #endif
@@ -388,31 +390,35 @@ final class AppModel {
     // MARK: OpenRouter OAuth PKCE
 
     func connectOpenRouter(backendID: String) {
-        guard !isPreview, openRouterConnectingBackendID == nil,
+        guard !isPreview,
               let config = settings.backend(id: backendID),
               config.type == .openAICompatible, config.preset == .openRouter else { return }
         guard OpenRouterAuth.isOfficialOrigin(config.openAI?.baseURL ?? "") else {
-            openRouterMessages[backendID] = OpenRouterAuthError.untrustedOrigin.localizedDescription
+            openRouterSignIn.setMessage(OpenRouterAuthError.untrustedOrigin.localizedDescription, for: backendID)
             return
         }
-        openRouterConnectingBackendID = backendID
-        openRouterMessages[backendID] = ""
+        guard let attemptID = openRouterSignIn.begin(backendID: backendID) else { return }
         openRouterAuthorization = Task {
             defer {
-                if openRouterConnectingBackendID == backendID { openRouterConnectingBackendID = nil }
-                openRouterAuthorization = nil
+                if openRouterSignIn.activeAttemptID == attemptID {
+                    openRouterAuthorization = nil
+                }
             }
             do {
                 try await openRouterAuth.authorizeAndSave(
                     currentBaseURL: {
                         await MainActor.run {
-                            guard let current = self.settings.backend(id: backendID),
+                            guard self.openRouterSignIn.canCommit(attemptID: attemptID, backendID: backendID, isCancelled: Task.isCancelled),
+                                  let current = self.settings.backend(id: backendID),
                                   current.type == .openAICompatible, current.preset == .openRouter else { return nil }
                             return current.openAI?.baseURL
                         }
                     },
                     saveKey: { key in
                         try await MainActor.run {
+                            guard self.openRouterSignIn.canCommit(attemptID: attemptID, backendID: backendID, isCancelled: Task.isCancelled) else {
+                                throw OpenRouterAuthError.cancelled
+                            }
                             guard let current = self.settings.backend(id: backendID),
                                   current.type == .openAICompatible, current.preset == .openRouter,
                                   OpenRouterAuth.isOfficialOrigin(current.openAI?.baseURL ?? "") else {
@@ -424,26 +430,31 @@ final class AppModel {
                         }
                     },
                     openBrowser: { url in
-                        let opened = await MainActor.run { NSWorkspace.shared.open(url) }
-                        guard opened else {
-                            throw OpenRouterAuthError.unavailable("Couldn't open your browser. Try Sign in with OpenRouter again.")
+                        try await MainActor.run {
+                            guard self.openRouterSignIn.canCommit(attemptID: attemptID, backendID: backendID, isCancelled: Task.isCancelled) else {
+                                throw OpenRouterAuthError.cancelled
+                            }
+                            guard NSWorkspace.shared.open(url) else {
+                                throw OpenRouterAuthError.unavailable("Couldn't open your browser. Try Sign in with OpenRouter again.")
+                            }
                         }
                     }
                 )
-                try Task.checkCancellation()
-                openRouterKeyVersion[backendID, default: 0] += 1
-                openRouterMessages[backendID] = ""
+                guard openRouterSignIn.succeed(attemptID: attemptID, backendID: backendID) else { return }
+                openRouterAuthorization = nil
                 await refreshStatuses(only: backendID)
             } catch is CancellationError {
-                openRouterMessages[backendID] = "Sign-in cancelled."
+                _ = openRouterSignIn.fail(attemptID: attemptID, backendID: backendID, message: "Sign-in cancelled.")
             } catch {
-                openRouterMessages[backendID] = error.localizedDescription
+                _ = openRouterSignIn.fail(attemptID: attemptID, backendID: backendID, message: error.localizedDescription)
             }
         }
     }
 
     func cancelOpenRouterConnection() {
+        openRouterSignIn.cancel()
         openRouterAuthorization?.cancel()
+        openRouterAuthorization = nil
         Task { await openRouterAuth.cancelAuthorization() }
     }
 
@@ -452,11 +463,11 @@ final class AppModel {
               let config = settings.backend(id: backendID) else { return }
         let oauthRemoved = Keychain.write("", for: config.openRouterOAuthKeychainAccount)
         let manualRemoved = Keychain.write("", for: config.keychainAccount)
-        openRouterKeyVersion[backendID, default: 0] += 1
+        openRouterSignIn.bumpKeyVersion(for: backendID)
         if oauthRemoved && manualRemoved {
-            openRouterMessages[backendID] = ""
+            openRouterSignIn.setMessage("", for: backendID)
         } else {
-            openRouterMessages[backendID] = "Couldn't remove the OpenRouter key from your login Keychain. Unlock it and try again."
+            openRouterSignIn.setMessage("Couldn't remove the OpenRouter key from your login Keychain. Unlock it and try again.", for: backendID)
         }
         Task { await refreshStatuses(only: backendID) }
     }
@@ -590,8 +601,7 @@ final class AppModel {
         Keychain.write("", for: config.openRouterOAuthKeychainAccount)
         settings.removeBackend(id: config.id)
         statuses[config.id] = nil
-        openRouterMessages[config.id] = nil
-        openRouterKeyVersion[config.id] = nil
+        openRouterSignIn.removeBackend(config.id)
     }
 
     /// A fix's button title, e.g. "Get LM Studio" when the app it would open isn't installed.

@@ -212,6 +212,109 @@ import CryptoKit
         }
         #expect(OpenRouterStubProtocol.requests().isEmpty)
     }
+
+    @Test func cancelRacingCommitPreservesExistingCredentialAndNeverCallsSave() async throws {
+        let fixture = OpenRouterAuthFixture()
+        let auth = OpenRouterAuth(urlSession: fixture.network())
+        let storedKey = OpenRouterStringBox("sk-or-v1-existing-key")
+        let gate = OpenRouterGate()
+        let checkCount = OpenRouterCounter()
+
+        let task = Task {
+            try await auth.authorizeAndSave(
+                currentBaseURL: {
+                    if checkCount.next() == 2 {
+                        // Suspended right after code exchange, immediately before credential commit.
+                        await gate.arriveAndWait()
+                    }
+                    return "https://openrouter.ai/api/v1"
+                },
+                saveKey: { storedKey.set($0) },
+                openBrowser: { url in try await fixture.openBrowser(url) }
+            )
+        }
+
+        await gate.waitUntilArrived()
+        await auth.cancelAuthorization()
+        task.cancel()
+        await gate.release()
+
+        await #expect(throws: (any Error).self) { try await task.value }
+        #expect(storedKey.value == "sk-or-v1-existing-key")
+    }
+
+    @Test func supersededAttemptCannotOverwriteNewerSignInCredential() async throws {
+        let fixture = OpenRouterAuthFixture()
+        let auth = OpenRouterAuth(urlSession: fixture.network())
+        let storedKey = OpenRouterStringBox("sk-or-v1-initial")
+        let gate = OpenRouterGate()
+        let firstChecks = OpenRouterCounter()
+
+        fixture.exchangeResponse = #"{"key":"sk-or-v1-stale-key","user_id":"user_1"}"#
+        let staleTask = Task {
+            try await auth.authorizeAndSave(
+                currentBaseURL: {
+                    if firstChecks.next() == 2 {
+                        await gate.arriveAndWait()
+                    }
+                    return "https://openrouter.ai/api/v1"
+                },
+                saveKey: { storedKey.set($0) },
+                openBrowser: { url in try await fixture.openBrowser(url) }
+            )
+        }
+
+        await gate.waitUntilArrived()
+        // A newer sign-in starts and completes while the obsolete attempt is paused before commit.
+        fixture.exchangeResponse = #"{"key":"sk-or-v1-newer-key","user_id":"user_2"}"#
+        try await auth.authorizeAndSave(
+            currentBaseURL: { "https://openrouter.ai/api/v1" },
+            saveKey: { storedKey.set($0) },
+            openBrowser: { url in try await fixture.openBrowser(url) }
+        )
+        #expect(storedKey.value == "sk-or-v1-newer-key")
+
+        await gate.release()
+        await #expect(throws: OpenRouterAuthError.cancelled) { try await staleTask.value }
+        #expect(storedKey.value == "sk-or-v1-newer-key")
+    }
+
+    @Test func signInStateRejectsCancelledAndObsoleteAttemptsWithoutDisturbingNewerSignIn() throws {
+        var state = OpenRouterSignInState()
+        let first = state.begin(backendID: "or-1")
+        let attempt1 = try #require(first)
+        let concurrent = state.begin(backendID: "or-1")
+        #expect(concurrent == nil, "Concurrent attempt while active is rejected")
+        #expect(state.canCommit(attemptID: attempt1, backendID: "or-1", isCancelled: false))
+
+        // Cancelling immediately invalidates attempt1 and lets a fresh attempt2 start.
+        let cancelledID = state.cancel()
+        #expect(cancelledID == "or-1")
+        #expect(!state.canCommit(attemptID: attempt1, backendID: "or-1", isCancelled: false))
+        #expect(state.messages["or-1"] == "Sign-in cancelled.")
+
+        let second = state.begin(backendID: "or-1")
+        let attempt2 = try #require(second)
+        #expect(state.connectingBackendID == "or-1")
+        #expect(state.messages["or-1"] == "")
+
+        // Late unwinding from attempt1 must neither commit nor overwrite attempt2's state.
+        #expect(!state.canCommit(attemptID: attempt1, backendID: "or-1", isCancelled: false))
+        let staleSucceeded = state.succeed(attemptID: attempt1, backendID: "or-1")
+        let staleFailed = state.fail(attemptID: attempt1, backendID: "or-1", message: "stale error")
+        #expect(!staleSucceeded)
+        #expect(!staleFailed)
+        #expect(state.connectingBackendID == "or-1")
+        #expect(state.messages["or-1"] == "")
+        #expect(state.keyVersion["or-1"] == nil)
+
+        // attempt2 commits cleanly.
+        #expect(state.canCommit(attemptID: attempt2, backendID: "or-1", isCancelled: false))
+        let newerSucceeded = state.succeed(attemptID: attempt2, backendID: "or-1")
+        #expect(newerSucceeded)
+        #expect(state.connectingBackendID == nil)
+        #expect(state.keyVersion["or-1"] == 1)
+    }
 }
 
 private final class OpenRouterStringBox: @unchecked Sendable {
@@ -220,6 +323,40 @@ private final class OpenRouterStringBox: @unchecked Sendable {
     init(_ initial: String?) { stored = initial }
     var value: String? { lock.withLock { stored } }
     func set(_ value: String?) { lock.withLock { stored = value } }
+}
+
+private final class OpenRouterCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    func next() -> Int { lock.withLock { value += 1; return value } }
+}
+
+private actor OpenRouterGate {
+    private var arrived = false
+    private var released = false
+    private var arrivalWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func arriveAndWait() async {
+        arrived = true
+        for waiter in arrivalWaiters { waiter.resume() }
+        arrivalWaiters.removeAll()
+        if !released {
+            await withCheckedContinuation { releaseWaiters.append($0) }
+        }
+    }
+
+    func waitUntilArrived() async {
+        if !arrived {
+            await withCheckedContinuation { arrivalWaiters.append($0) }
+        }
+    }
+
+    func release() {
+        released = true
+        for waiter in releaseWaiters { waiter.resume() }
+        releaseWaiters.removeAll()
+    }
 }
 
 private final class OpenRouterURLBox: @unchecked Sendable {

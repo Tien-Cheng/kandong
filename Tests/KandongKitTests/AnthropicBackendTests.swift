@@ -123,19 +123,21 @@ import Testing
         #expect(content[1]["text"]?.string == "早上好")
 
         let explainReq = AIRequest(system: "Explain", user: "你好", task: .explain)
-        let explainBody = b.body(for: explainReq, model: "claude-sonnet-4-5", options: try b.initialOptions(for: explainReq))
+        let explainBody = b.body(for: explainReq, model: "claude-sonnet-4-5", options: b.initialOptions(for: explainReq))
         #expect(explainBody["thinking"]?["type"]?.string == "adaptive")
         #expect(explainBody["output_config"]?["effort"]?.string == "high")
         #expect(explainBody["output_config"]?["format"] == nil)
 
         let defaultBackend = backend()
-        let defaultBody = defaultBackend.body(for: explainReq, model: "claude-sonnet-4-5", options: try defaultBackend.initialOptions(for: explainReq))
+        let defaultBody = defaultBackend.body(for: explainReq, model: "claude-sonnet-4-5", options: defaultBackend.initialOptions(for: explainReq))
         #expect(defaultBody["thinking"] == nil)
         #expect(defaultBody["output_config"] == nil)
     }
 
-    @Test func offThinkingUsesBetweenToolsWhenDisabledRejectedAndNeverSilentlyEnablesAdaptive() async throws {
-        // 1. Model advertising disabled=false, between_tools=true (e.g. Claude Sonnet 5.5) uses between_tools immediately.
+    @Test func offAndLegacyThinkingSettingsAgreeAcrossEffectiveOptionRequestAndUI() async throws {
+        let successSSE = try Self.success(#"{"translation":"Hi"}"#)
+
+        // 1. Model advertising disabled=false, between_tools=true (e.g. Claude Sonnet 5.5): Off stays valid and uses between_tools.
         let sonnet55Catalog = #"""
         {
           "data": [{
@@ -155,18 +157,62 @@ import Testing
           }]
         }
         """#
-        let successSSE = try Self.success(#"{"translation":"Hi"}"#)
         AnthropicStubProtocol.setHandler { request in
             if request.url?.path == "/v1/models" { return (200, sonnet55Catalog, "application/json") }
             return (200, successSSE, "text/event-stream")
         }
         let sonnet55 = backend(model: "claude-sonnet-5-5", reasoning: ReasoningSettings(translate: "off", explain: ""))
+        let sonnet55Model = try #require(try await sonnet55.models().first)
+        #expect(sonnet55Model.allowedThinkingLevels.contains("off"))
+        #expect(sonnet55Model.resolvedThinkingLevel(for: "off") == "off")
         #expect(try await sonnet55.complete(AIRequest(system: "Translate", user: "你好")) == #"{"translation":"Hi"}"#)
-        let firstMsg = try #require(AnthropicStubProtocol.requests().last { $0.url?.path == "/v1/messages" })
-        let firstBody = try JSONValue.decode(try #require(firstMsg.httpBody))
-        #expect(firstBody["thinking"]?["type"]?.string == "between_tools")
+        let sonnetMsg = try #require(AnthropicStubProtocol.requests().last { $0.url?.path == "/v1/messages" })
+        let sonnetBody = try JSONValue.decode(try #require(sonnetMsg.httpBody))
+        #expect(sonnetBody["thinking"]?["type"]?.string == "between_tools")
 
-        // 2. Model without thinking metadata rejecting `disabled` retries with `between_tools` (and if schema fails, drops schema).
+        // 2. Model advertising disabled=false and between_tools=false with saved Off:
+        // UI advertises `Off (uses Low)` via allowedThinkingLevels + Reasoning.resolve, and request sends adaptive effort=low.
+        let alwaysThinkingCatalog = #"""
+        {
+          "data": [{
+            "type": "model",
+            "id": "claude-always-thinking",
+            "display_name": "Claude Always Thinking",
+            "capabilities": {
+              "thinking": {
+                "types": {
+                  "adaptive": { "supported": true },
+                  "disabled": { "supported": false },
+                  "between_tools": { "supported": false }
+                }
+              }
+            }
+          }]
+        }
+        """#
+        AnthropicStubProtocol.setHandler { request in
+            if request.url?.path == "/v1/models" { return (200, alwaysThinkingCatalog, "application/json") }
+            return (200, successSSE, "text/event-stream")
+        }
+        let alwaysThinking = backend(model: "claude-always-thinking", reasoning: ReasoningSettings(translate: "off", explain: "xhigh"))
+        let alwaysModel = try #require(try await alwaysThinking.models().first)
+        #expect(!alwaysModel.allowedThinkingLevels.contains("off"))
+        #expect(alwaysModel.resolvedThinkingLevel(for: "off") == "low")
+        #expect(alwaysModel.resolvedThinkingLevel(for: "minimal") == "low")
+        #expect(alwaysModel.resolvedThinkingLevel(for: "xhigh") == "high")
+        #expect(try await alwaysThinking.complete(AIRequest(system: "Translate", user: "你好")) == #"{"translation":"Hi"}"#)
+        let alwaysMsg = try #require(AnthropicStubProtocol.requests().last { $0.url?.path == "/v1/messages" })
+        let alwaysBody = try JSONValue.decode(try #require(alwaysMsg.httpBody))
+        #expect(alwaysBody["thinking"]?["type"]?.string == "adaptive")
+        #expect(alwaysBody["output_config"]?["effort"]?.string == "low")
+
+        // Old saved "xhigh" resolves to "high" on Anthropic (matching ThinkingPicker).
+        let explainReq = AIRequest(system: "Explain", user: "你好", task: .explain)
+        let xhighBody = alwaysThinking.body(for: explainReq, model: alwaysModel.id, options: alwaysThinking.initialOptions(for: explainReq, model: alwaysModel))
+        #expect(xhighBody["thinking"]?["type"]?.string == "adaptive")
+        #expect(xhighBody["output_config"]?["effort"]?.string == "high")
+
+        // 3. Model without metadata rejecting `disabled` tries `between_tools`, then drops schema if rejected.
         let attempts = AnthropicCounter()
         AnthropicStubProtocol.setHandler { request in
             if request.url?.path == "/v1/models" { return (200, Self.catalog, "application/json") }
@@ -187,52 +233,80 @@ import Testing
         #expect(thirdBody["thinking"]?["type"]?.string == "between_tools")
         #expect(thirdBody["output_config"] == nil)
 
-        // 3. Model rejecting BOTH `disabled` and `between_tools` fails cleanly rather than omitting `thinking` and enabling adaptive thinking.
-        let alwaysOnAttempts = AnthropicCounter()
+        // 4. Model without metadata rejecting BOTH `disabled` and `between_tools` falls back to adaptive effort="low"
+        // (never omitting `thinking` to default higher effort).
+        let bothRejected = AnthropicCounter()
         AnthropicStubProtocol.setHandler { request in
             if request.url?.path == "/v1/models" { return (200, Self.catalog, "application/json") }
-            _ = alwaysOnAttempts.next()
-            return (400, #"{"error":{"type":"invalid_request_error","message":"thinking mode is not supported"}}"#, "application/json")
-        }
-        let alwaysOn = backend(reasoning: ReasoningSettings(translate: "off", explain: ""))
-        await #expect(throws: BackendError.self) {
-            _ = try await alwaysOn.complete(AIRequest(system: "Translate", user: "你好"))
-        }
-        let sentToAlwaysOn = AnthropicStubProtocol.requests().filter { $0.url?.path == "/v1/messages" }
-        #expect(sentToAlwaysOn.count == 2)
-        for req in sentToAlwaysOn {
-            let body = try JSONValue.decode(try #require(req.httpBody))
-            #expect(body["thinking"] != nil, "Off setting must never omit thinking and silently enable adaptive thinking")
-        }
-
-        // 4. Model advertising disabled=false and between_tools=false fails before sending /v1/messages.
-        let noOffCatalog = #"""
-        {
-          "data": [{
-            "type": "model",
-            "id": "claude-always-thinking",
-            "display_name": "Claude Always Thinking",
-            "capabilities": {
-              "thinking": {
-                "types": {
-                  "adaptive": { "supported": true },
-                  "disabled": { "supported": false },
-                  "between_tools": { "supported": false }
-                }
-              }
+            let n = bothRejected.next()
+            if n == 1 {
+                return (400, #"{"error":{"type":"invalid_request_error","message":"thinking.type disabled is not supported"}}"#, "application/json")
             }
-          }]
-        }
-        """#
-        AnthropicStubProtocol.setHandler { request in
-            if request.url?.path == "/v1/models" { return (200, noOffCatalog, "application/json") }
+            if n == 2 {
+                return (400, #"{"error":{"type":"invalid_request_error","message":"thinking.type between_tools is not supported"}}"#, "application/json")
+            }
             return (200, successSSE, "text/event-stream")
         }
-        let noOff = backend(model: "claude-always-thinking", reasoning: ReasoningSettings(translate: "off", explain: ""))
-        await #expect(throws: BackendError.self) {
-            _ = try await noOff.complete(AIRequest(system: "Translate", user: "你好"))
-        }
-        #expect(AnthropicStubProtocol.requests().allSatisfy { $0.url?.path == "/v1/models" })
+        let lowFallback = backend(reasoning: ReasoningSettings(translate: "off", explain: ""))
+        #expect(try await lowFallback.complete(AIRequest(system: "Translate", user: "你好")) == #"{"translation":"Hi"}"#)
+        let lowRequests = AnthropicStubProtocol.requests().filter { $0.url?.path == "/v1/messages" }
+        #expect(lowRequests.count == 3)
+        let finalBody = try JSONValue.decode(try #require(lowRequests[2].httpBody))
+        #expect(finalBody["thinking"]?["type"]?.string == "adaptive")
+        #expect(finalBody["output_config"]?["effort"]?.string == "low")
+    }
+
+    @Test func staleModelFetchesNeverOverwriteNewerCredentialsURLOrSelection() throws {
+        var state = AnthropicModelCatalogState()
+        let keyA = AnthropicModelFetchKey(backendID: "claude-1", baseURL: "https://api.anthropic.com", apiKey: "sk-ant-old")
+        let keyB = AnthropicModelFetchKey(backendID: "claude-1", baseURL: "https://api.anthropic.com", apiKey: "sk-ant-new")
+        let modelOld = [AnthropicModel(id: "old-model", displayName: "Old")]
+        let modelNew = [AnthropicModel(id: "new-model", displayName: "New")]
+
+        let started1 = state.beginFetch(for: keyA)
+        let gen1 = try #require(started1)
+        #expect(state.isLoading)
+        let started2 = state.beginFetch(for: keyB)
+        let gen2 = try #require(started2)
+        #expect(state.isLoading)
+
+        // Newer fetch completes first.
+        let finished2 = state.finish(generation: gen2, key: keyB, result: .success(modelNew))
+        #expect(finished2)
+        #expect(!state.isLoading && state.models == modelNew && state.error.isEmpty)
+
+        // Older fetch finishing late (success or failure) must not overwrite models, error, or loading.
+        let staleSuccess = state.finish(generation: gen1, key: keyA, result: .success(modelOld))
+        let staleFailure = state.finish(generation: gen1, key: keyA, result: .failure(BackendError.failed("401")))
+        #expect(!staleSuccess)
+        #expect(!staleFailure)
+        #expect(state.models == modelNew && state.error.isEmpty && !state.isLoading)
+
+        // Clearing API key invalidates in-flight fetches; late error must not publish.
+        let started3 = state.beginFetch(for: keyB)
+        let gen3 = try #require(started3)
+        let emptyKey = AnthropicModelFetchKey(backendID: "claude-1", baseURL: "https://api.anthropic.com", apiKey: "")
+        let cleared = state.beginFetch(for: emptyKey)
+        #expect(cleared == nil)
+        #expect(!state.isLoading && state.models.isEmpty && state.error.isEmpty)
+        let lateClearFailure = state.finish(generation: gen3, key: keyB, result: .failure(BackendError.failed("late failure")))
+        #expect(!lateClearFailure)
+        #expect(!state.isLoading && state.models.isEmpty && state.error.isEmpty)
+
+        // Switching backend / URL keeps newer loading state intact when older request finishes.
+        let started4 = state.beginFetch(for: keyB)
+        let gen4 = try #require(started4)
+        state.invalidate(clearResults: true)
+        let otherBackend = AnthropicModelFetchKey(backendID: "claude-2", baseURL: "https://proxy.example.com", apiKey: "sk-ant-other")
+        let started5 = state.beginFetch(for: otherBackend)
+        let gen5 = try #require(started5)
+        let staleSwitchResult = state.finish(generation: gen4, key: keyB, result: .success(modelOld))
+        #expect(!staleSwitchResult)
+        #expect(state.isLoading, "Older backend fetch finishing must not clear newer backend's loading indicator")
+        #expect(state.models.isEmpty)
+        let finished5 = state.finish(generation: gen5, key: otherBackend, result: .success(modelNew))
+        #expect(finished5)
+        #expect(!state.isLoading && state.models == modelNew)
     }
 
     @Test func paginatesAllModelPagesForDiscoveryStatusAndVision() async throws {

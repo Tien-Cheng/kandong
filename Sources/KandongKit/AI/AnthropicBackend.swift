@@ -42,6 +42,92 @@ public struct AnthropicModel: Identifiable, Hashable, Sendable {
         self.maxTokens = maxTokens
         self.thinking = thinking
     }
+
+    /// Thinking options this model supports in UI order (always starting with Model default `""`).
+    public var allowedThinkingLevels: [String] {
+        if thinking.canDisableThinking {
+            return [""] + Reasoning.anthropicLevels
+        }
+        return [""] + Reasoning.anthropicLevels.filter { $0 != "off" }
+    }
+
+    /// The effective thinking level used for a saved `wanted` setting on this model, matching
+    /// `ThinkingPicker`'s fallback label (e.g., `"off"` resolves to `"low"` when thinking can't be turned off).
+    public func resolvedThinkingLevel(for wanted: String) -> String {
+        Reasoning.resolve(wanted, allowed: allowedThinkingLevels)
+    }
+}
+
+/// Identifies the exact backend, URL, and API key a Claude `/v1/models` fetch belongs to.
+public struct AnthropicModelFetchKey: Equatable, Sendable {
+    public let backendID: String
+    public let baseURL: String
+    public let apiKey: String
+
+    public init(backendID: String, baseURL: String, apiKey: String) {
+        self.backendID = backendID
+        self.baseURL = baseURL
+        self.apiKey = apiKey
+    }
+}
+
+/// Coordinates Claude `/v1/models` fetches so stale or cancelled requests can never overwrite newer
+/// models, errors, or loading state when credentials, URL, or backend selection change.
+public struct AnthropicModelCatalogState: Equatable, Sendable {
+    public private(set) var models: [AnthropicModel] = []
+    public private(set) var error = ""
+    public private(set) var isLoading = false
+    public private(set) var activeKey: AnthropicModelFetchKey?
+    public private(set) var generation: UInt64 = 0
+
+    public init() {}
+
+    /// Starts a fetch for `key` (or clears state when the key is empty). Returns the generation token to
+    /// validate on completion, or `nil` when no network fetch should run.
+    @discardableResult
+    public mutating func beginFetch(for key: AnthropicModelFetchKey) -> UInt64? {
+        generation &+= 1
+        activeKey = key
+        models = []
+        error = ""
+        guard !key.apiKey.isEmpty else {
+            isLoading = false
+            return nil
+        }
+        isLoading = true
+        return generation
+    }
+
+    /// Invalidates any in-flight fetch (e.g., when switching backends, editing Server URL, or closing the view).
+    public mutating func invalidate(clearResults: Bool = false) {
+        generation &+= 1
+        activeKey = nil
+        isLoading = false
+        if clearResults {
+            models = []
+            error = ""
+        }
+    }
+
+    /// Publishes fetch results only if both `generation` and `key` still match the active configuration.
+    @discardableResult
+    public mutating func finish(
+        generation: UInt64,
+        key: AnthropicModelFetchKey,
+        result: Result<[AnthropicModel], Error>
+    ) -> Bool {
+        guard self.generation == generation, self.activeKey == key else { return false }
+        isLoading = false
+        switch result {
+        case .success(let fetched):
+            models = fetched
+            error = ""
+        case .failure(let failure):
+            models = []
+            error = failure.localizedDescription
+        }
+        return true
+    }
 }
 
 /// Native Claude Backend speaking Anthropic's Messages API (`POST /v1/messages`, `GET /v1/models`).
@@ -226,30 +312,24 @@ public struct AnthropicBackend: AIBackend {
         var thinkingMode: ThinkingMode
     }
 
-    func initialOptions(for request: AIRequest, model: AnthropicModel? = nil) throws -> Options {
-        let level = config.reasoning[request.task]
+    func initialOptions(for request: AIRequest, model: AnthropicModel? = nil) -> Options {
+        let wanted = config.reasoning[request.task]
+        let effective = model?.resolvedThinkingLevel(for: wanted)
+            ?? Reasoning.resolve(wanted, allowed: [""] + Reasoning.anthropicLevels)
         let thinkingMode: ThinkingMode
-        switch level {
+        switch effective {
         case "", "on":
             thinkingMode = .modelDefault
         case "off":
-            if let caps = model?.thinking, caps.supportsDisabled == false {
-                if caps.supportsBetweenTools == true {
-                    thinkingMode = .betweenTools
-                } else {
-                    throw BackendError.failed(Self.offUnavailableMessage(for: model?.displayName ?? name))
-                }
+            if let caps = model?.thinking, caps.supportsDisabled == false, caps.supportsBetweenTools == true {
+                thinkingMode = .betweenTools
             } else {
                 thinkingMode = .disabled
             }
         default:
-            thinkingMode = .adaptive(effort: level)
+            thinkingMode = .adaptive(effort: effective)
         }
         return Options(useSchema: request.schema != nil, thinkingMode: thinkingMode)
-    }
-
-    static func offUnavailableMessage(for modelName: String) -> String {
-        "\(modelName) doesn't support turning Thinking off. Choose Model default or a thinking level in AI settings."
     }
 
     func body(for request: AIRequest, model: String, options: Options, modelMaxTokens: Int? = nil) -> JSONValue {
@@ -323,22 +403,24 @@ public struct AnthropicBackend: AIBackend {
             resolved = AnthropicModel(id: settings.model, displayName: settings.model)
         }
 
-        var options = try initialOptions(for: request, model: resolved)
+        var options = initialOptions(for: request, model: resolved)
         while true {
             guard case .rejected(let status, let rawBody, let requestID) = try await stream(
                 request, model: resolved, options: options, apiKey: apiKey, continuation: continuation
             ) else { return }
 
             let lower = rawBody.lowercased()
-            // Never retry `disabled` by omitting `thinking`, because newer Claude models enable adaptive thinking by default.
+            // Never retry `disabled` by omitting `thinking` (which enables default adaptive thinking at higher effort).
+            // Try `between_tools` first (no upfront thinking); if that is also rejected, fall back to lowest adaptive effort ("low"),
+            // matching `ThinkingPicker`'s `Off (uses Low)` fallback.
             if options.thinkingMode == .disabled, lower.contains("thinking") || lower.contains("disabled") {
                 if resolved.thinking.supportsBetweenTools != false {
                     options.thinkingMode = .betweenTools
                 } else {
-                    throw BackendError.failed(Self.offUnavailableMessage(for: resolved.displayName))
+                    options.thinkingMode = .adaptive(effort: "low")
                 }
             } else if options.thinkingMode == .betweenTools, lower.contains("thinking") || lower.contains("between_tools") {
-                throw BackendError.failed(Self.offUnavailableMessage(for: resolved.displayName))
+                options.thinkingMode = .adaptive(effort: "low")
             } else if case .adaptive(let effort) = options.thinkingMode, effort != nil,
                       lower.contains("effort"), !lower.contains("thinking") {
                 options.thinkingMode = .adaptive(effort: nil)
