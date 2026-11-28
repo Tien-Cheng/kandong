@@ -5,21 +5,40 @@ public struct OpenAICompatibleBackend: AIBackend {
     public let config: BackendConfig
     public let settings: OpenAISettings
     public let apiKey: String?
+    /// True when `apiKey` came from OpenRouter's browser PKCE flow and must never leave `https://openrouter.ai`.
+    public let isOpenRouterOAuthKey: Bool
     private let urlSession: URLSession
     /// Overrides `deadline(for:)`, for tests.
     var timeLimit: Int?
 
-    public init(config: BackendConfig, apiKey: String? = nil, urlSession: URLSession = .shared) {
+    public init(
+        config: BackendConfig,
+        apiKey: String? = nil,
+        isOpenRouterOAuthKey: Bool = false,
+        urlSession: URLSession = .shared
+    ) {
         self.config = config
         self.settings = config.openAI ?? OpenAISettings(baseURL: (config.preset ?? .other).baseURL)
         self.apiKey = apiKey
+        self.isOpenRouterOAuthKey = isOpenRouterOAuthKey
         self.urlSession = urlSession
     }
 
     private var name: String { config.name }
     private var isLMStudio: Bool { config.isLMStudio }
     private var isOpenRouter: Bool {
-        config.preset == .openRouter && URL(string: baseURL)?.host?.lowercased() == "openrouter.ai"
+        config.preset == .openRouter && OpenRouterAuth.isOfficialOrigin(baseURL)
+    }
+
+    /// True when a browser-issued OpenRouter key is attached to a non-official Server URL and must be withheld.
+    private var hasOriginMismatchForOAuthKey: Bool {
+        isOpenRouterOAuthKey && !(apiKey?.isEmpty ?? true) && !OpenRouterAuth.isOfficialOrigin(baseURL)
+    }
+
+    /// Credential permitted to be sent to `baseURL`; nil when an OAuth key is bound to another origin.
+    private var effectiveAPIKey: String? {
+        guard !hasOriginMismatchForOAuthKey else { return nil }
+        return apiKey
     }
 
     public var label: String {
@@ -33,7 +52,10 @@ public struct OpenAICompatibleBackend: AIBackend {
     }
 
     public func status() async -> BackendStatus {
-        if config.preset?.needsKey == true, apiKey?.isEmpty ?? true {
+        if hasOriginMismatchForOAuthKey {
+            return .needsSetup("OpenRouter browser sign-in keys are only sent to https://openrouter.ai. Restore the official OpenRouter URL or enter a manual API key.")
+        }
+        if config.preset?.needsKey == true, effectiveAPIKey?.isEmpty ?? true {
             if isOpenRouter {
                 return .needsSetup("Sign in with OpenRouter or add an API key.", fix: .connectOpenRouter(backendID: config.id))
             }
@@ -42,8 +64,8 @@ public struct OpenAICompatibleBackend: AIBackend {
         // Ask the server even when a model is configured, so a stopped server or a bad key shows up.
         do {
             // OpenRouter's /models endpoint is public and returns 200 even with an invalid key, so validate via /key first.
-            if isOpenRouter, let apiKey, !apiKey.isEmpty {
-                _ = try await OpenRouterAuth.keyInfo(apiKey: apiKey, baseURL: baseURL, urlSession: urlSession)
+            if isOpenRouter, let key = effectiveAPIKey, !key.isEmpty {
+                _ = try await OpenRouterAuth.keyInfo(apiKey: key, baseURL: baseURL, urlSession: urlSession)
             }
             let models = try await availableModels()
             guard let model = settings.model.isEmpty ? models.first : settings.model else {
@@ -70,12 +92,13 @@ public struct OpenAICompatibleBackend: AIBackend {
     }
 
     private func rawModelEntries() async throws -> [JSONValue] {
+        if hasOriginMismatchForOAuthKey { throw OpenRouterAuthError.untrustedOrigin }
         guard let url = URL(string: baseURL + "/models") else {
             throw BackendError.serverUnavailable(name: name, url: baseURL, hint: "Check the server URL in Settings.")
         }
         var request = URLRequest(url: url)
         request.timeoutInterval = 5
-        if let apiKey, !apiKey.isEmpty { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
+        if let key = effectiveAPIKey, !key.isEmpty { request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
         let (data, response) = try await urlSession.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 200
         guard (200..<300).contains(status) else { throw BackendError.http(status: status, body: String(decoding: data, as: UTF8.self)) }
@@ -83,6 +106,7 @@ public struct OpenAICompatibleBackend: AIBackend {
     }
 
     public func supportsImages() async -> Bool {
+        if hasOriginMismatchForOAuthKey { return false }
         switch settings.vision {
         case .yes: return true
         case .no: return false
@@ -104,6 +128,7 @@ public struct OpenAICompatibleBackend: AIBackend {
 
     /// The configured model, or the first one the server offers.
     func resolveModel(lmStudioModels: [LMStudioModel]? = nil) async throws -> String {
+        if hasOriginMismatchForOAuthKey { throw OpenRouterAuthError.untrustedOrigin }
         if !settings.model.isEmpty { return settings.model }
         if isLMStudio {
             let models: [LMStudioModel]
@@ -118,7 +143,7 @@ public struct OpenAICompatibleBackend: AIBackend {
         }
         var request = URLRequest(url: url)
         request.timeoutInterval = 5
-        if let apiKey, !apiKey.isEmpty { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
+        if let key = effectiveAPIKey, !key.isEmpty { request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
         guard let (data, _) = try? await urlSession.data(for: request) else {
             throw BackendError.serverUnavailable(name: name, url: baseURL, hint: "Is the server running?")
         }
@@ -230,6 +255,7 @@ public struct OpenAICompatibleBackend: AIBackend {
         _ request: AIRequest, model: String, options: Options,
         continuation: AsyncThrowingStream<String, Error>.Continuation
     ) async throws -> Outcome {
+        if hasOriginMismatchForOAuthKey { throw OpenRouterAuthError.untrustedOrigin }
         guard let url = URL(string: baseURL + "/chat/completions") else {
             throw BackendError.serverUnavailable(name: name, url: baseURL, hint: "Check the server URL in Settings.")
         }
@@ -263,7 +289,7 @@ public struct OpenAICompatibleBackend: AIBackend {
         urlRequest.httpMethod = "POST"
         urlRequest.timeoutInterval = 300
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let apiKey, !apiKey.isEmpty { urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
+        if let key = effectiveAPIKey, !key.isEmpty { urlRequest.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
         if isOpenRouter {
             urlRequest.setValue(OpenRouterAuth.referer, forHTTPHeaderField: "HTTP-Referer")
             urlRequest.setValue(OpenRouterAuth.appTitle, forHTTPHeaderField: "X-Title")

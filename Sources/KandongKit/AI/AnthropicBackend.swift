@@ -1,17 +1,46 @@
 import Foundation
 
+/// Thinking capabilities reported by Anthropic's `/v1/models` `capabilities.thinking.types` object.
+public struct AnthropicThinkingCapabilities: Hashable, Sendable {
+    public let supportsDisabled: Bool?
+    public let supportsBetweenTools: Bool?
+    public let supportsAdaptive: Bool?
+
+    public init(supportsDisabled: Bool? = nil, supportsBetweenTools: Bool? = nil, supportsAdaptive: Bool? = nil) {
+        self.supportsDisabled = supportsDisabled
+        self.supportsBetweenTools = supportsBetweenTools
+        self.supportsAdaptive = supportsAdaptive
+    }
+
+    /// Whether the model supports turning upfront thinking off (via `disabled` or `between_tools`).
+    /// Nil capability metadata is treated optimistically until the API says otherwise.
+    public var canDisableThinking: Bool {
+        if supportsDisabled == true || supportsBetweenTools == true { return true }
+        if supportsDisabled == false { return false }
+        return true
+    }
+}
+
 /// A model reported by Anthropic's `/v1/models` endpoint.
 public struct AnthropicModel: Identifiable, Hashable, Sendable {
     public let id: String
     public let displayName: String
     public let supportsImages: Bool
     public let maxTokens: Int?
+    public let thinking: AnthropicThinkingCapabilities
 
-    public init(id: String, displayName: String, supportsImages: Bool = false, maxTokens: Int? = nil) {
+    public init(
+        id: String,
+        displayName: String,
+        supportsImages: Bool = false,
+        maxTokens: Int? = nil,
+        thinking: AnthropicThinkingCapabilities = AnthropicThinkingCapabilities()
+    ) {
         self.id = id
         self.displayName = displayName
         self.supportsImages = supportsImages
         self.maxTokens = maxTokens
+        self.thinking = thinking
     }
 }
 
@@ -19,6 +48,7 @@ public struct AnthropicModel: Identifiable, Hashable, Sendable {
 public struct AnthropicBackend: AIBackend {
     public static let consoleKeysURL = URL(string: "https://console.anthropic.com/settings/keys")!
     public static let apiVersion = "2023-06-01"
+    private static let maxModelPages = 50
 
     public let config: BackendConfig
     public let settings: AnthropicSettings
@@ -67,36 +97,74 @@ public struct AnthropicBackend: AIBackend {
         }
     }
 
+    /// Lists every page of models returned by `GET /v1/models` using cursor pagination (`after_id`).
     public func models() async throws -> [AnthropicModel] {
         guard let apiKey, !apiKey.isEmpty else {
             throw BackendError.failed("Add your Anthropic API key in AI settings.")
         }
-        guard let url = URL(string: baseURL + "/v1/models") else {
-            throw BackendError.serverUnavailable(name: name, url: baseURL, hint: "Check the server URL in Settings.")
-        }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 10
-        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-        request.setValue(Self.apiVersion, forHTTPHeaderField: "anthropic-version")
+        var collected: [AnthropicModel] = []
+        var seenIDs: Set<String> = []
+        var afterID: String?
 
-        let data: Data, response: URLResponse
-        do {
-            (data, response) = try await urlSession.data(for: request)
-        } catch {
-            throw BackendError.serverUnavailable(name: name, url: baseURL, hint: "Check your internet connection or server URL.")
+        for _ in 0..<Self.maxModelPages {
+            guard var components = URLComponents(string: baseURL + "/v1/models") else {
+                throw BackendError.serverUnavailable(name: name, url: baseURL, hint: "Check the server URL in Settings.")
+            }
+            var queryItems = [URLQueryItem(name: "limit", value: "100")]
+            if let afterID { queryItems.append(URLQueryItem(name: "after_id", value: afterID)) }
+            components.queryItems = queryItems
+            guard let url = components.url else {
+                throw BackendError.serverUnavailable(name: name, url: baseURL, hint: "Check the server URL in Settings.")
+            }
+
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 10
+            request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+            request.setValue(Self.apiVersion, forHTTPHeaderField: "anthropic-version")
+
+            let data: Data, response: URLResponse
+            do {
+                (data, response) = try await urlSession.data(for: request)
+            } catch {
+                throw BackendError.serverUnavailable(name: name, url: baseURL, hint: "Check your internet connection or server URL.")
+            }
+            try checkHTTP(response, data: data, key: apiKey)
+
+            let payload = try JSONValue.decode(data)
+            guard let list = payload["data"]?.array else {
+                throw BackendError.badResponse("\(name) did not return its model list.")
+            }
+            var lastEntryID: String?
+            for entry in list {
+                guard let id = entry["id"]?.string, !id.isEmpty else { continue }
+                lastEntryID = id
+                guard seenIDs.insert(id).inserted else { continue }
+                let displayName = entry["display_name"]?.string ?? id
+                // Never infer vision from model names; rely on capability metadata when provided.
+                let capabilities = entry["capabilities"]
+                let vision = capabilities?["image_input"]?["supported"]?.bool ?? false
+                let maxTokens = entry["max_tokens"]?.number.map(Int.init)
+                let thinkingTypes = capabilities?["thinking"]?["types"]
+                let thinking = AnthropicThinkingCapabilities(
+                    supportsDisabled: thinkingTypes?["disabled"]?["supported"]?.bool,
+                    supportsBetweenTools: thinkingTypes?["between_tools"]?["supported"]?.bool,
+                    supportsAdaptive: thinkingTypes?["adaptive"]?["supported"]?.bool
+                )
+                collected.append(AnthropicModel(
+                    id: id,
+                    displayName: displayName,
+                    supportsImages: vision,
+                    maxTokens: maxTokens,
+                    thinking: thinking
+                ))
+            }
+
+            guard payload["has_more"]?.bool == true else { break }
+            let nextCursor = payload["last_id"]?.string ?? lastEntryID
+            guard let nextCursor, !nextCursor.isEmpty, nextCursor != afterID else { break }
+            afterID = nextCursor
         }
-        try checkHTTP(response, data: data, key: apiKey)
-        guard let list = try JSONValue.decode(data)["data"]?.array else {
-            throw BackendError.badResponse("\(name) did not return its model list.")
-        }
-        return list.compactMap { entry in
-            guard let id = entry["id"]?.string, !id.isEmpty else { return nil }
-            let displayName = entry["display_name"]?.string ?? id
-            // Never infer vision from model names; rely on capability metadata when provided.
-            let vision = entry["capabilities"]?["image_input"]?["supported"]?.bool ?? false
-            let maxTokens = entry["max_tokens"]?.number.map(Int.init)
-            return AnthropicModel(id: id, displayName: displayName, supportsImages: vision, maxTokens: maxTokens)
-        }
+        return collected
     }
 
     private func resolveModel(in catalog: [AnthropicModel]) throws -> AnthropicModel {
@@ -148,6 +216,8 @@ public struct AnthropicBackend: AIBackend {
     enum ThinkingMode: Equatable {
         case modelDefault
         case disabled
+        /// Disables upfront thinking on models (like Claude Sonnet 5.5) that reject `disabled`.
+        case betweenTools
         case adaptive(effort: String?)
     }
 
@@ -156,15 +226,30 @@ public struct AnthropicBackend: AIBackend {
         var thinkingMode: ThinkingMode
     }
 
-    func initialOptions(for request: AIRequest) -> Options {
+    func initialOptions(for request: AIRequest, model: AnthropicModel? = nil) throws -> Options {
         let level = config.reasoning[request.task]
         let thinkingMode: ThinkingMode
         switch level {
-        case "", "on": thinkingMode = .modelDefault
-        case "off": thinkingMode = .disabled
-        default: thinkingMode = .adaptive(effort: level)
+        case "", "on":
+            thinkingMode = .modelDefault
+        case "off":
+            if let caps = model?.thinking, caps.supportsDisabled == false {
+                if caps.supportsBetweenTools == true {
+                    thinkingMode = .betweenTools
+                } else {
+                    throw BackendError.failed(Self.offUnavailableMessage(for: model?.displayName ?? name))
+                }
+            } else {
+                thinkingMode = .disabled
+            }
+        default:
+            thinkingMode = .adaptive(effort: level)
         }
         return Options(useSchema: request.schema != nil, thinkingMode: thinkingMode)
+    }
+
+    static func offUnavailableMessage(for modelName: String) -> String {
+        "\(modelName) doesn't support turning Thinking off. Choose Model default or a thinking level in AI settings."
     }
 
     func body(for request: AIRequest, model: String, options: Options, modelMaxTokens: Int? = nil) -> JSONValue {
@@ -187,7 +272,7 @@ public struct AnthropicBackend: AIBackend {
 
         // Thinking tokens count toward max_tokens on Anthropic, so leave ample headroom when thinking may run.
         let desiredMaxTokens: Int = switch options.thinkingMode {
-        case .disabled: max(2048, request.expectedReplyLength * 3 + 2048)
+        case .disabled, .betweenTools: max(2048, request.expectedReplyLength * 3 + 2048)
         case .modelDefault, .adaptive: max(16_384, request.expectedReplyLength * 4 + 4096)
         }
         let maxTokens = modelMaxTokens.map { min(desiredMaxTokens, $0) } ?? desiredMaxTokens
@@ -208,6 +293,8 @@ public struct AnthropicBackend: AIBackend {
             break
         case .disabled:
             body["thinking"] = ["type": "disabled"]
+        case .betweenTools:
+            body["thinking"] = ["type": "between_tools"]
         case .adaptive(let effort):
             body["thinking"] = ["type": "adaptive"]
             if let effort { outputConfig["effort"] = .string(effort) }
@@ -236,18 +323,26 @@ public struct AnthropicBackend: AIBackend {
             resolved = AnthropicModel(id: settings.model, displayName: settings.model)
         }
 
-        var options = initialOptions(for: request)
+        var options = try initialOptions(for: request, model: resolved)
         while true {
             guard case .rejected(let status, let rawBody, let requestID) = try await stream(
                 request, model: resolved, options: options, apiKey: apiKey, continuation: continuation
             ) else { return }
 
             let lower = rawBody.lowercased()
-            // Degrade gracefully when a specific Claude generation rejects thinking, effort, or structured outputs.
-            if case .adaptive(let effort) = options.thinkingMode, effort != nil,
-               lower.contains("effort"), !lower.contains("thinking") {
+            // Never retry `disabled` by omitting `thinking`, because newer Claude models enable adaptive thinking by default.
+            if options.thinkingMode == .disabled, lower.contains("thinking") || lower.contains("disabled") {
+                if resolved.thinking.supportsBetweenTools != false {
+                    options.thinkingMode = .betweenTools
+                } else {
+                    throw BackendError.failed(Self.offUnavailableMessage(for: resolved.displayName))
+                }
+            } else if options.thinkingMode == .betweenTools, lower.contains("thinking") || lower.contains("between_tools") {
+                throw BackendError.failed(Self.offUnavailableMessage(for: resolved.displayName))
+            } else if case .adaptive(let effort) = options.thinkingMode, effort != nil,
+                      lower.contains("effort"), !lower.contains("thinking") {
                 options.thinkingMode = .adaptive(effort: nil)
-            } else if options.thinkingMode != .modelDefault,
+            } else if case .adaptive = options.thinkingMode,
                       lower.contains("thinking") || lower.contains("effort") {
                 options.thinkingMode = .modelDefault
             } else if options.useSchema,
@@ -352,6 +447,7 @@ public struct AnthropicBackend: AIBackend {
                 if let reason = json["delta"]?["stop_reason"]?.string {
                     stopReason = reason
                     if reason == "refusal" { throw BackendError.refused(name: who) }
+                    if reason == "model_context_window_exceeded" { throw BackendError.contextTooLong }
                 }
             case "error":
                 let errorObj = json["error"] ?? json
@@ -362,6 +458,7 @@ public struct AnthropicBackend: AIBackend {
                 throw BackendError.failed(formatMessage(message, type: errorObj["type"]?.string, requestID: requestID, key: apiKey))
             case "message_stop":
                 if stopReason == "refusal" { throw BackendError.refused(name: who) }
+                if stopReason == "model_context_window_exceeded" { throw BackendError.contextTooLong }
                 if stopReason == "max_tokens" { throw BackendError.cutOff(name: who) }
                 guard !reply.isEmpty else {
                     throw BackendError.badResponse("\(name) completed without an answer.")

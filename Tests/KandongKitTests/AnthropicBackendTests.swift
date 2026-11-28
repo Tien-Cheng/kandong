@@ -123,20 +123,51 @@ import Testing
         #expect(content[1]["text"]?.string == "早上好")
 
         let explainReq = AIRequest(system: "Explain", user: "你好", task: .explain)
-        let explainBody = b.body(for: explainReq, model: "claude-sonnet-4-5", options: b.initialOptions(for: explainReq))
+        let explainBody = b.body(for: explainReq, model: "claude-sonnet-4-5", options: try b.initialOptions(for: explainReq))
         #expect(explainBody["thinking"]?["type"]?.string == "adaptive")
         #expect(explainBody["output_config"]?["effort"]?.string == "high")
         #expect(explainBody["output_config"]?["format"] == nil)
 
         let defaultBackend = backend()
-        let defaultBody = defaultBackend.body(for: explainReq, model: "claude-sonnet-4-5", options: defaultBackend.initialOptions(for: explainReq))
+        let defaultBody = defaultBackend.body(for: explainReq, model: "claude-sonnet-4-5", options: try defaultBackend.initialOptions(for: explainReq))
         #expect(defaultBody["thinking"] == nil)
         #expect(defaultBody["output_config"] == nil)
     }
 
-    @Test func gracefullyRetriesWhenModelRejectsThinkingOrSchema() async throws {
-        let attempts = AnthropicCounter()
+    @Test func offThinkingUsesBetweenToolsWhenDisabledRejectedAndNeverSilentlyEnablesAdaptive() async throws {
+        // 1. Model advertising disabled=false, between_tools=true (e.g. Claude Sonnet 5.5) uses between_tools immediately.
+        let sonnet55Catalog = #"""
+        {
+          "data": [{
+            "type": "model",
+            "id": "claude-sonnet-5-5",
+            "display_name": "Claude Sonnet 5.5",
+            "capabilities": {
+              "image_input": { "supported": true },
+              "thinking": {
+                "types": {
+                  "adaptive": { "supported": true },
+                  "disabled": { "supported": false },
+                  "between_tools": { "supported": true }
+                }
+              }
+            }
+          }]
+        }
+        """#
         let successSSE = try Self.success(#"{"translation":"Hi"}"#)
+        AnthropicStubProtocol.setHandler { request in
+            if request.url?.path == "/v1/models" { return (200, sonnet55Catalog, "application/json") }
+            return (200, successSSE, "text/event-stream")
+        }
+        let sonnet55 = backend(model: "claude-sonnet-5-5", reasoning: ReasoningSettings(translate: "off", explain: ""))
+        #expect(try await sonnet55.complete(AIRequest(system: "Translate", user: "你好")) == #"{"translation":"Hi"}"#)
+        let firstMsg = try #require(AnthropicStubProtocol.requests().last { $0.url?.path == "/v1/messages" })
+        let firstBody = try JSONValue.decode(try #require(firstMsg.httpBody))
+        #expect(firstBody["thinking"]?["type"]?.string == "between_tools")
+
+        // 2. Model without thinking metadata rejecting `disabled` retries with `between_tools` (and if schema fails, drops schema).
+        let attempts = AnthropicCounter()
         AnthropicStubProtocol.setHandler { request in
             if request.url?.path == "/v1/models" { return (200, Self.catalog, "application/json") }
             let n = attempts.next()
@@ -148,15 +179,106 @@ import Testing
             }
             return (200, successSSE, "text/event-stream")
         }
-
-        let b = backend(reasoning: ReasoningSettings(translate: "off", explain: ""))
-        let reply = try await b.complete(AIRequest(system: "Translate", user: "你好", schema: Prompts.translationSchema))
-        #expect(reply == #"{"translation":"Hi"}"#)
-        let messageRequests = AnthropicStubProtocol.requests().filter { $0.url?.path == "/v1/messages" }
-        #expect(messageRequests.count == 3)
-        let thirdBody = try JSONValue.decode(try #require(messageRequests[2].httpBody))
-        #expect(thirdBody["thinking"] == nil)
+        let fallback = backend(reasoning: ReasoningSettings(translate: "off", explain: ""))
+        #expect(try await fallback.complete(AIRequest(system: "Translate", user: "你好", schema: Prompts.translationSchema)) == #"{"translation":"Hi"}"#)
+        let msgRequests = AnthropicStubProtocol.requests().filter { $0.url?.path == "/v1/messages" }
+        #expect(msgRequests.count == 3)
+        let thirdBody = try JSONValue.decode(try #require(msgRequests[2].httpBody))
+        #expect(thirdBody["thinking"]?["type"]?.string == "between_tools")
         #expect(thirdBody["output_config"] == nil)
+
+        // 3. Model rejecting BOTH `disabled` and `between_tools` fails cleanly rather than omitting `thinking` and enabling adaptive thinking.
+        let alwaysOnAttempts = AnthropicCounter()
+        AnthropicStubProtocol.setHandler { request in
+            if request.url?.path == "/v1/models" { return (200, Self.catalog, "application/json") }
+            _ = alwaysOnAttempts.next()
+            return (400, #"{"error":{"type":"invalid_request_error","message":"thinking mode is not supported"}}"#, "application/json")
+        }
+        let alwaysOn = backend(reasoning: ReasoningSettings(translate: "off", explain: ""))
+        await #expect(throws: BackendError.self) {
+            _ = try await alwaysOn.complete(AIRequest(system: "Translate", user: "你好"))
+        }
+        let sentToAlwaysOn = AnthropicStubProtocol.requests().filter { $0.url?.path == "/v1/messages" }
+        #expect(sentToAlwaysOn.count == 2)
+        for req in sentToAlwaysOn {
+            let body = try JSONValue.decode(try #require(req.httpBody))
+            #expect(body["thinking"] != nil, "Off setting must never omit thinking and silently enable adaptive thinking")
+        }
+
+        // 4. Model advertising disabled=false and between_tools=false fails before sending /v1/messages.
+        let noOffCatalog = #"""
+        {
+          "data": [{
+            "type": "model",
+            "id": "claude-always-thinking",
+            "display_name": "Claude Always Thinking",
+            "capabilities": {
+              "thinking": {
+                "types": {
+                  "adaptive": { "supported": true },
+                  "disabled": { "supported": false },
+                  "between_tools": { "supported": false }
+                }
+              }
+            }
+          }]
+        }
+        """#
+        AnthropicStubProtocol.setHandler { request in
+            if request.url?.path == "/v1/models" { return (200, noOffCatalog, "application/json") }
+            return (200, successSSE, "text/event-stream")
+        }
+        let noOff = backend(model: "claude-always-thinking", reasoning: ReasoningSettings(translate: "off", explain: ""))
+        await #expect(throws: BackendError.self) {
+            _ = try await noOff.complete(AIRequest(system: "Translate", user: "你好"))
+        }
+        #expect(AnthropicStubProtocol.requests().allSatisfy { $0.url?.path == "/v1/models" })
+    }
+
+    @Test func paginatesAllModelPagesForDiscoveryStatusAndVision() async throws {
+        let page1 = #"""
+        {
+          "data": [
+            { "type": "model", "id": "claude-page-1", "display_name": "Claude Page 1", "capabilities": { "image_input": { "supported": false } } }
+          ],
+          "has_more": true,
+          "first_id": "claude-page-1",
+          "last_id": "claude-page-1"
+        }
+        """#
+        let page2 = #"""
+        {
+          "data": [
+            { "type": "model", "id": "claude-page-2", "display_name": "Claude Page 2", "capabilities": { "image_input": { "supported": true } } }
+          ],
+          "has_more": false,
+          "first_id": "claude-page-2",
+          "last_id": "claude-page-2"
+        }
+        """#
+        AnthropicStubProtocol.setHandler { request in
+            let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let afterID = items.first(where: { $0.name == "after_id" })?.value
+            if afterID == "claude-page-1" {
+                return (200, page2, "application/json")
+            }
+            return (200, page1, "application/json")
+        }
+
+        let b = backend(model: "claude-page-2")
+        let all = try await b.models()
+        #expect(all.map(\.id) == ["claude-page-1", "claude-page-2"])
+        #expect(await b.status() == .ready("Claude Page 2"))
+        #expect(await b.supportsImages())
+    }
+
+    @Test func mapsModelContextWindowExceededStopReasonToContextTooLong() async throws {
+        Self.stub(try Self.event("content_block_delta", ["index": 0, "delta": ["type": "text_delta", "text": "partial translation"]])
+            + Self.event("message_delta", ["delta": ["stop_reason": "model_context_window_exceeded"]])
+            + Self.event("message_stop"))
+        await #expect(throws: BackendError.contextTooLong) {
+            _ = try await backend().complete(AIRequest(system: "Translate", user: "很长的文本"))
+        }
     }
 
     @Test func handlesFragmentedCRLFThinkingRefusalMaxTokensErrorsAndRedaction() async throws {

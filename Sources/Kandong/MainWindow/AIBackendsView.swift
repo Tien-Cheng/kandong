@@ -244,7 +244,11 @@ private struct BackendDetail: View {
                 #if DEBUG
                 if model.isPreview { return model.previewConnectedBackendIDs.contains(config.id) }
                 #endif
-                return !(Keychain.read(config.keychainAccount) ?? "").isEmpty
+                let credential = model.openAICredential(for: config)
+                if credential.isOpenRouterOAuthKey {
+                    return OpenRouterAuth.isOfficialOrigin(config.openAI?.baseURL ?? "") && !(credential.apiKey ?? "").isEmpty
+                }
+                return !(credential.apiKey ?? "").isEmpty
             }
             return true
         }
@@ -475,6 +479,23 @@ private struct AnthropicFields: View {
         return models
     }
 
+    private var selectedModel: AnthropicModel? {
+        if settings.wrappedValue.model.isEmpty { return displayedModels.first }
+        return displayedModels.first { $0.id == settings.wrappedValue.model }
+    }
+
+    private var thinkingOptions: [String] {
+        if selectedModel?.thinking.canDisableThinking == false {
+            return [""] + Reasoning.anthropicLevels.filter { $0 != "off" }
+        }
+        return [""] + Reasoning.anthropicLevels
+    }
+
+    private var thinkingNote: String? {
+        guard let selectedModel, !selectedModel.thinking.canDisableThinking else { return nil }
+        return "\(selectedModel.displayName) doesn't support turning thinking off."
+    }
+
     var body: some View {
         TextField("Name", text: $config.name)
         SecureField("API key", text: $apiKey, prompt: Text("sk-ant-…"))
@@ -500,9 +521,12 @@ private struct AnthropicFields: View {
             Text(modelError).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
         }
         ThinkingPicker(title: "Thinking when translating", level: settings.reasoning.translate,
-                       options: [""] + Reasoning.anthropicLevels)
+                       options: thinkingOptions)
         ThinkingPicker(title: "Thinking when explaining", level: settings.reasoning.explain,
-                       options: [""] + Reasoning.anthropicLevels)
+                       options: thinkingOptions)
+        if let thinkingNote {
+            Text(thinkingNote).font(.caption).foregroundStyle(.secondary)
+        }
         Picker("Reads images", selection: settings.vision) {
             Text("Detect (uses on-device OCR if unknown)").tag(VisionSupport.auto)
             Text("Yes").tag(VisionSupport.yes)
@@ -563,6 +587,7 @@ private struct OpenAIFields: View {
     @ViewState private var lmModels: [LMStudioModel] = []
     @ViewState private var reachable = false
     @ViewState private var apiKey = ""
+    @ViewState private var hasOAuthKey = false
     @ViewState private var showAdvanced = false
 
     private var settings: Binding<OpenAISettings> {
@@ -573,7 +598,7 @@ private struct OpenAIFields: View {
     }
 
     private var isOpenRouter: Bool {
-        config.preset == .openRouter && URL(string: settings.wrappedValue.baseURL)?.host?.lowercased() == "openrouter.ai"
+        config.preset == .openRouter && OpenRouterAuth.isOfficialOrigin(settings.wrappedValue.baseURL)
     }
 
     private var isOpenRouterConnecting: Bool {
@@ -584,7 +609,7 @@ private struct OpenAIFields: View {
         #if DEBUG
         if model.isPreview { return model.previewConnectedBackendIDs.contains(config.id) }
         #endif
-        return !apiKey.isEmpty
+        return hasOAuthKey || !apiKey.isEmpty
     }
 
     var body: some View {
@@ -595,6 +620,17 @@ private struct OpenAIFields: View {
             } else {
                 TextField("Server URL", text: settings.baseURL)
                     .onSubmit { Task { await refresh() } }
+                if config.preset == .openRouter && hasOAuthKey {
+                    HStack {
+                        Text("Browser sign-in keys only work with https://openrouter.ai.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Restore Official URL") {
+                            settings.wrappedValue.baseURL = OpenAIPreset.openRouter.baseURL
+                            Task { await refresh() }
+                        }
+                    }
+                }
             }
             if config.preset != .lmStudio && config.preset != .ollama && !(isOpenRouter && isOpenRouterConnected) {
                 SecureField(
@@ -642,7 +678,7 @@ private struct OpenAIFields: View {
             }
             if isOpenRouter {
                 DisclosureGroup("Advanced", isExpanded: $showAdvanced) {
-                    if isOpenRouterConnected {
+                    if isOpenRouterConnected && !hasOAuthKey {
                         SecureField("API key", text: $apiKey)
                             .onChange(of: apiKey) {
                                 guard !model.isPreview else { return }
@@ -659,19 +695,24 @@ private struct OpenAIFields: View {
         .task {
             guard !model.isPreview else {
                 #if DEBUG
-                if isOpenRouter, model.previewConnectedBackendIDs.contains(config.id) { apiKey = "sk-or-preview" }
+                if isOpenRouter, model.previewConnectedBackendIDs.contains(config.id) { hasOAuthKey = true }
                 #endif
                 return
             }
-            apiKey = Keychain.read(config.keychainAccount) ?? ""
+            reloadKeys()
             await refresh()
         }
         .onChange(of: model.openRouterKeyVersion[config.id]) {
             guard !model.isPreview else { return }
-            apiKey = Keychain.read(config.keychainAccount) ?? ""
+            reloadKeys()
         }
         // A finished download adds a model to LM Studio's list.
         .onChange(of: model.modelDownloads[config.id]?.isActive == true) { Task { await refresh() } }
+    }
+
+    private func reloadKeys() {
+        apiKey = Keychain.read(config.keychainAccount) ?? ""
+        hasOAuthKey = config.preset == .openRouter && !(Keychain.read(config.openRouterOAuthKeychainAccount) ?? "").isEmpty
     }
 
     @ViewBuilder private var openRouterControls: some View {

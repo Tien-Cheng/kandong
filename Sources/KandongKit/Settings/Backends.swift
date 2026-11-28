@@ -147,8 +147,11 @@ public struct BackendConfig: Codable, Hashable, Sendable, Identifiable {
         }
     }
 
-    /// Where its API key is kept in the Keychain.
+    /// Where its manual API key is kept in the Keychain.
     public var keychainAccount: String { "api-key-\(id)" }
+
+    /// Where a browser-issued OpenRouter OAuth key is kept in the Keychain (bound to `https://openrouter.ai`).
+    public var openRouterOAuthKeychainAccount: String { "openrouter-oauth-key-\(id)" }
 
     /// Whether text sent to it stays on this Mac.
     public var isOnDevice: Bool {

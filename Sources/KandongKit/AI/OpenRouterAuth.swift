@@ -3,6 +3,7 @@ import Foundation
 public enum OpenRouterAuthError: Error, LocalizedError, Equatable, Sendable {
     case cancelled
     case invalidCallback
+    case untrustedOrigin
     case exchangeFailed(String)
     case unavailable(String)
 
@@ -12,6 +13,8 @@ public enum OpenRouterAuthError: Error, LocalizedError, Equatable, Sendable {
             return "OpenRouter sign-in was cancelled."
         case .invalidCallback:
             return "OpenRouter sign-in could not be verified. Please try again."
+        case .untrustedOrigin:
+            return "OpenRouter browser sign-in keys can only be saved and sent to https://openrouter.ai."
         case .exchangeFailed(let message), .unavailable(let message):
             return message
         }
@@ -69,10 +72,41 @@ public actor OpenRouterAuth {
         self.now = now
     }
 
+    /// True only for the official OpenRouter HTTPS origin (`https://openrouter.ai` on default port 443, no userinfo).
+    public static func isOfficialOrigin(_ urlString: String) -> Bool {
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed),
+              url.scheme?.lowercased() == "https",
+              url.host?.lowercased() == "openrouter.ai",
+              url.user == nil,
+              url.password == nil,
+              url.port == nil || url.port == 443 else {
+            return false
+        }
+        return true
+    }
+
     public func cancelAuthorization() {
         authorizationID = nil
         callbackListener?.cancel()
         callbackListener = nil
+    }
+
+    /// Verifies that the target backend points to the official HTTPS OpenRouter origin both before launching
+    /// browser sign-in and immediately before persisting the exchanged key.
+    public func authorizeAndSave(
+        currentBaseURL: @escaping @Sendable () async -> String?,
+        saveKey: @escaping @Sendable (String) async throws -> Void,
+        openBrowser: @escaping @Sendable (URL) async throws -> Void
+    ) async throws {
+        guard let initialURL = await currentBaseURL(), Self.isOfficialOrigin(initialURL) else {
+            throw OpenRouterAuthError.untrustedOrigin
+        }
+        let key = try await authorize(openBrowser: openBrowser)
+        guard let finalURL = await currentBaseURL(), Self.isOfficialOrigin(finalURL) else {
+            throw OpenRouterAuthError.untrustedOrigin
+        }
+        try await saveKey(key)
     }
 
     /// Starts the local loopback listener, opens the browser for OpenRouter PKCE approval, and exchanges the code for a scoped API key.
@@ -143,11 +177,15 @@ public actor OpenRouterAuth {
     }
 
     /// Queries OpenRouter's `/key` endpoint to verify an API key and inspect its metadata.
+    /// Never sends credentials off the official `https://openrouter.ai` origin.
     public static func keyInfo(
         apiKey: String,
         baseURL: String = OpenAIPreset.openRouter.baseURL,
         urlSession: URLSession = .shared
     ) async throws -> OpenRouterKeyInfo {
+        guard isOfficialOrigin(baseURL) else {
+            throw OpenRouterAuthError.untrustedOrigin
+        }
         var trimmed = baseURL.trimmingCharacters(in: .whitespaces)
         while trimmed.hasSuffix("/") { trimmed.removeLast() }
         guard let url = URL(string: trimmed + "/key") else {

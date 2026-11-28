@@ -256,12 +256,33 @@ final class AppModel {
 
     func backend(for config: BackendConfig) -> AIBackend {
         switch config.type {
-        case .appleIntelligence: AppleIntelligenceBackend(readingMode: config.readingMode)
-        case .chatGPT: ChatGPTBackend(settings: settings.chatGPT, session: chatGPTSession,
-                                    readingMode: config.readingMode, state: chatGPTBackendState)
-        case .anthropic: AnthropicBackend(config: config, apiKey: Keychain.read(config.keychainAccount))
-        case .openAICompatible: OpenAICompatibleBackend(config: config, apiKey: Keychain.read(config.keychainAccount))
+        case .appleIntelligence: return AppleIntelligenceBackend(readingMode: config.readingMode)
+        case .chatGPT: return ChatGPTBackend(settings: settings.chatGPT, session: chatGPTSession,
+                                             readingMode: config.readingMode, state: chatGPTBackendState)
+        case .anthropic: return AnthropicBackend(config: config, apiKey: Keychain.read(config.keychainAccount))
+        case .openAICompatible:
+            let credential = openAICredential(for: config)
+            return OpenAICompatibleBackend(
+                config: config,
+                apiKey: credential.apiKey,
+                isOpenRouterOAuthKey: credential.isOpenRouterOAuthKey
+            )
         }
+    }
+
+    func openAICredential(for config: BackendConfig) -> (apiKey: String?, isOpenRouterOAuthKey: Bool) {
+        let manualKey = Keychain.read(config.keychainAccount)
+        guard config.preset == .openRouter,
+              let oauthKey = Keychain.read(config.openRouterOAuthKeychainAccount), !oauthKey.isEmpty else {
+            return (manualKey, false)
+        }
+        // On a custom (non-official) URL, an explicit manual key takes precedence; otherwise return the OAuth key
+        // marked as origin-bound so OpenAICompatibleBackend withholds it and explains why.
+        if !OpenRouterAuth.isOfficialOrigin(config.openAI?.baseURL ?? ""),
+           let manualKey, !manualKey.isEmpty {
+            return (manualKey, false)
+        }
+        return (oauthKey, true)
     }
 
     // MARK: ChatGPT accounts
@@ -370,6 +391,10 @@ final class AppModel {
         guard !isPreview, openRouterConnectingBackendID == nil,
               let config = settings.backend(id: backendID),
               config.type == .openAICompatible, config.preset == .openRouter else { return }
+        guard OpenRouterAuth.isOfficialOrigin(config.openAI?.baseURL ?? "") else {
+            openRouterMessages[backendID] = OpenRouterAuthError.untrustedOrigin.localizedDescription
+            return
+        }
         openRouterConnectingBackendID = backendID
         openRouterMessages[backendID] = ""
         openRouterAuthorization = Task {
@@ -378,18 +403,34 @@ final class AppModel {
                 openRouterAuthorization = nil
             }
             do {
-                let key = try await openRouterAuth.authorize { url in
-                    let opened = await MainActor.run { NSWorkspace.shared.open(url) }
-                    guard opened else {
-                        throw OpenRouterAuthError.unavailable("Couldn't open your browser. Try Sign in with OpenRouter again.")
+                try await openRouterAuth.authorizeAndSave(
+                    currentBaseURL: {
+                        await MainActor.run {
+                            guard let current = self.settings.backend(id: backendID),
+                                  current.type == .openAICompatible, current.preset == .openRouter else { return nil }
+                            return current.openAI?.baseURL
+                        }
+                    },
+                    saveKey: { key in
+                        try await MainActor.run {
+                            guard let current = self.settings.backend(id: backendID),
+                                  current.type == .openAICompatible, current.preset == .openRouter,
+                                  OpenRouterAuth.isOfficialOrigin(current.openAI?.baseURL ?? "") else {
+                                throw OpenRouterAuthError.untrustedOrigin
+                            }
+                            guard Keychain.write(key, for: current.openRouterOAuthKeychainAccount) else {
+                                throw OpenRouterAuthError.unavailable("Couldn't save the OpenRouter key in your login Keychain. Unlock it and try again.")
+                            }
+                        }
+                    },
+                    openBrowser: { url in
+                        let opened = await MainActor.run { NSWorkspace.shared.open(url) }
+                        guard opened else {
+                            throw OpenRouterAuthError.unavailable("Couldn't open your browser. Try Sign in with OpenRouter again.")
+                        }
                     }
-                }
+                )
                 try Task.checkCancellation()
-                guard let current = settings.backend(id: backendID) else { return }
-                guard Keychain.write(key, for: current.keychainAccount) else {
-                    openRouterMessages[backendID] = "Couldn't save the OpenRouter key in your login Keychain. Unlock it and try again."
-                    return
-                }
                 openRouterKeyVersion[backendID, default: 0] += 1
                 openRouterMessages[backendID] = ""
                 await refreshStatuses(only: backendID)
@@ -409,9 +450,14 @@ final class AppModel {
     func disconnectOpenRouter(backendID: String) {
         guard !isPreview, openRouterConnectingBackendID != backendID,
               let config = settings.backend(id: backendID) else { return }
-        Keychain.write("", for: config.keychainAccount)
+        let oauthRemoved = Keychain.write("", for: config.openRouterOAuthKeychainAccount)
+        let manualRemoved = Keychain.write("", for: config.keychainAccount)
         openRouterKeyVersion[backendID, default: 0] += 1
-        openRouterMessages[backendID] = ""
+        if oauthRemoved && manualRemoved {
+            openRouterMessages[backendID] = ""
+        } else {
+            openRouterMessages[backendID] = "Couldn't remove the OpenRouter key from your login Keychain. Unlock it and try again."
+        }
         Task { await refreshStatuses(only: backendID) }
     }
 
@@ -541,6 +587,7 @@ final class AppModel {
     func removeBackend(_ config: BackendConfig) {
         if openRouterConnectingBackendID == config.id { cancelOpenRouterConnection() }
         Keychain.write("", for: config.keychainAccount)
+        Keychain.write("", for: config.openRouterOAuthKeychainAccount)
         settings.removeBackend(id: config.id)
         statuses[config.id] = nil
         openRouterMessages[config.id] = nil

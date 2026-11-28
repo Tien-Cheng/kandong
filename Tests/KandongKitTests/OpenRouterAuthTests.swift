@@ -146,6 +146,80 @@ import CryptoKit
         #expect(completionReq.value(forHTTPHeaderField: "X-Title") == OpenRouterAuth.appTitle)
         #expect(completionReq.value(forHTTPHeaderField: "Authorization") == "Bearer sk-or-valid")
     }
+
+    @Test func officialOriginChecksSchemeHostPortAndUserinfo() {
+        #expect(OpenRouterAuth.isOfficialOrigin("https://openrouter.ai/api/v1"))
+        #expect(OpenRouterAuth.isOfficialOrigin("https://OPENROUTER.AI:443/api/v1"))
+        #expect(!OpenRouterAuth.isOfficialOrigin("http://openrouter.ai/api/v1"))
+        #expect(!OpenRouterAuth.isOfficialOrigin("https://openrouter.ai:8443/api/v1"))
+        #expect(!OpenRouterAuth.isOfficialOrigin("https://user@openrouter.ai/api/v1"))
+        #expect(!OpenRouterAuth.isOfficialOrigin("https://evil.example/api/v1"))
+        #expect(!OpenRouterAuth.isOfficialOrigin("https://openrouter.ai.evil.example/api/v1"))
+    }
+
+    @Test func urlChangeDuringSignInRefusesToSaveBrowserIssuedKey() async throws {
+        let fixture = OpenRouterAuthFixture()
+        let auth = OpenRouterAuth(urlSession: fixture.network())
+        let currentURL = OpenRouterStringBox("https://openrouter.ai/api/v1")
+        let savedKey = OpenRouterStringBox(nil)
+
+        await #expect(throws: OpenRouterAuthError.untrustedOrigin) {
+            try await auth.authorizeAndSave(
+                currentBaseURL: { currentURL.value },
+                saveKey: { savedKey.set($0) },
+                openBrowser: { url in
+                    // User edits Server URL away from the official origin while browser sign-in is open.
+                    currentURL.set("https://evil.example/api/v1")
+                    try await fixture.openBrowser(url)
+                }
+            )
+        }
+        #expect(savedKey.value == nil)
+    }
+
+    @Test func browserIssuedKeyIsNeverSentOffOfficialHTTPSOrigin() async throws {
+        for badURL in [
+            "http://openrouter.ai/api/v1",
+            "https://openrouter.ai:8443/api/v1",
+            "https://evil.example/api/v1",
+        ] {
+            OpenRouterStubProtocol.setHandler { _ in (200, "{}", "application/json") }
+            var config = BackendConfig.openAI(.openRouter, id: "or-origin")
+            config.openAI?.baseURL = badURL
+            let backend = OpenAICompatibleBackend(
+                config: config,
+                apiKey: "sk-or-v1-browser-secret",
+                isOpenRouterOAuthKey: true,
+                urlSession: OpenRouterStubProtocol.session()
+            )
+            let status = await backend.status()
+            #expect(!status.isReady)
+            #expect(status.message.contains("https://openrouter.ai"))
+            #expect(!(await backend.supportsImages()))
+            await #expect(throws: OpenRouterAuthError.untrustedOrigin) {
+                _ = try await backend.complete(AIRequest(system: "Translate", user: "你好"))
+            }
+            #expect(OpenRouterStubProtocol.requests().isEmpty, "OAuth key must never be sent to \(badURL)")
+        }
+
+        OpenRouterStubProtocol.setHandler { _ in (200, "{}", "application/json") }
+        await #expect(throws: OpenRouterAuthError.untrustedOrigin) {
+            _ = try await OpenRouterAuth.keyInfo(
+                apiKey: "sk-or-v1-browser-secret",
+                baseURL: "http://openrouter.ai/api/v1",
+                urlSession: OpenRouterStubProtocol.session()
+            )
+        }
+        #expect(OpenRouterStubProtocol.requests().isEmpty)
+    }
+}
+
+private final class OpenRouterStringBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: String?
+    init(_ initial: String?) { stored = initial }
+    var value: String? { lock.withLock { stored } }
+    func set(_ value: String?) { lock.withLock { stored = value } }
 }
 
 private final class OpenRouterURLBox: @unchecked Sendable {
