@@ -41,6 +41,29 @@ public struct OpenAISettings: Codable, Hashable, Sendable {
     }
 }
 
+/// Settings for a native Claude (Anthropic Messages API) Backend. API keys live in the login Keychain.
+public struct AnthropicSettings: Codable, Hashable, Sendable {
+    public static let defaultBaseURL = "https://api.anthropic.com"
+    /// Base URL without the `/v1/...` suffix.
+    public var baseURL: String
+    /// Model id; empty means the first model returned by `/v1/models`.
+    public var model = ""
+    public var vision: VisionSupport = .auto
+    public var reasoning: ReasoningSettings = .modelDefault
+
+    public init(baseURL: String = Self.defaultBaseURL) {
+        self.baseURL = baseURL
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        baseURL = (try? c.decodeIfPresent(String.self, forKey: .baseURL)) ?? Self.defaultBaseURL
+        model = (try? c.decodeIfPresent(String.self, forKey: .model)) ?? ""
+        vision = (try? c.decodeIfPresent(VisionSupport.self, forKey: .vision)) ?? .auto
+        reasoning = (try? c.decodeIfPresent(ReasoningSettings.self, forKey: .reasoning)) ?? .modelDefault
+    }
+}
+
 /// A key and modifiers, independent of AppKit/Carbon.
 public struct KeyCombo: Codable, Hashable, Sendable {
     public var keyCode: UInt32

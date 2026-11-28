@@ -27,6 +27,8 @@ struct AIBackendsView: View {
                         .contextMenu { menu(for: config) }
                 }
                 Menu("Add Backend") {
+                    Button("Claude (Anthropic)") { selectedID = model.addAnthropicBackend().id }
+                    Divider()
                     ForEach(OpenAIPreset.allCases) { preset in
                         Button(preset.displayName) { selectedID = model.addBackend(preset).id }
                     }
@@ -36,7 +38,7 @@ struct AIBackendsView: View {
             } header: {
                 Text("Backends")
             } footer: {
-                Text("Add Ollama, OpenRouter, OpenAI or any OpenAI-compatible server. Right-click a Backend to make it the default.")
+                Text("Add Claude, OpenRouter, Ollama, OpenAI or any OpenAI-compatible server. Right-click a Backend to make it the default.")
             }
 
             if let config = model.settings.backend(id: selectedID) {
@@ -48,6 +50,9 @@ struct AIBackendsView: View {
         .task { if !model.isPreview { await model.refreshStatuses() } }
         .onChange(of: model.chatGPTConnecting, initial: true) {
             if model.chatGPTConnecting { selectedID = BackendConfig.chatGPT.id }
+        }
+        .onChange(of: model.openRouterConnectingBackendID, initial: true) {
+            if let id = model.openRouterConnectingBackendID { selectedID = id }
         }
         .sheet(isPresented: Binding(
             get: { model.chatGPTWelcomeAccountID != nil },
@@ -184,16 +189,17 @@ private struct BackendDetail: View {
                         .foregroundStyle(.secondary).lineLimit(3).textSelection(.enabled)
                         .multilineTextAlignment(.trailing)
                         .frame(maxWidth: .infinity, alignment: .trailing)
-                    if let fix = model.statuses[config.id]?.fix, config.type != .chatGPT {
+                    if let fix = model.statuses[config.id]?.fix, shouldShowInlineFix(fix) {
                         Button(model.title(for: fix)) { model.perform(fix) }
                     }
                     Button(testing ? "Testing…" : "Test", action: test)
-                        .disabled(testing || (config.type == .chatGPT && !canTestChatGPT))
+                        .disabled(testing || !canTest)
                 }
             }
             switch config.type {
             case .appleIntelligence: EmptyView()
             case .chatGPT: ChatGPTFields(model: model)
+            case .anthropic: AnthropicFields(model: model, config: $config)
             case .openAICompatible: OpenAIFields(model: model, config: $config)
             }
             Picker("Reading corrections", selection: $config.readingModeSetting) {
@@ -215,6 +221,39 @@ private struct BackendDetail: View {
         }
     }
 
+    private func shouldShowInlineFix(_ fix: FixAction) -> Bool {
+        if config.type == .chatGPT { return false }
+        if case .connectOpenRouter = fix { return false }
+        return true
+    }
+
+    private var canTest: Bool {
+        switch config.type {
+        case .appleIntelligence:
+            return true
+        case .chatGPT:
+            return canTestChatGPT
+        case .anthropic:
+            #if DEBUG
+            if model.isPreview { return model.previewConnectedBackendIDs.contains(config.id) }
+            #endif
+            return !(Keychain.read(config.keychainAccount) ?? "").isEmpty
+        case .openAICompatible:
+            if model.openRouterConnectingBackendID == config.id { return false }
+            if config.preset?.needsKey == true {
+                #if DEBUG
+                if model.isPreview { return model.previewConnectedBackendIDs.contains(config.id) }
+                #endif
+                let credential = model.openAICredential(for: config)
+                if credential.isOpenRouterOAuthKey {
+                    return OpenRouterAuth.isOfficialOrigin(config.openAI?.baseURL ?? "") && !(credential.apiKey ?? "").isEmpty
+                }
+                return !(credential.apiKey ?? "").isEmpty
+            }
+            return true
+        }
+    }
+
     private var canTestChatGPT: Bool {
         guard !model.chatGPTConnecting, !model.chatGPTSigningOut,
               let account = model.chatGPTAccounts.first(where: { $0.id == model.settings.chatGPT.accountID }) else { return false }
@@ -227,11 +266,14 @@ private struct BackendDetail: View {
             "Apple's model on this Mac: nothing to install or sign in to, and text never leaves this Mac. Needs Apple Intelligence turned on in System Settings."
         case .chatGPT:
             "Use an eligible ChatGPT Plus or Pro plan. Text and any images you send go to OpenAI. No terminal setup or API key is needed."
+        case .anthropic:
+            "Connects directly to Anthropic's Messages API. Text and any images you send go to Anthropic. The API key is stored in your Keychain."
         case .openAICompatible:
             switch config.preset {
             case .lmStudio?: "Runs fully on this Mac. Install LM Studio and start its server (Developer tab, or `lms server start`), then download the recommended model here. Thinking makes small models slow and can stall them, so Kandong translates with it off."
             case .ollama?: "Runs fully on this Mac. Install Ollama, then `ollama pull` a model."
-            case .openRouter?, .openAI?: "A hosted service: text is sent to it. The key is stored in your Keychain."
+            case .openRouter?: "A hosted gateway to Claude, Gemini, Qwen, DeepSeek and more. Text and any images you send go to OpenRouter. Sign in with your browser or paste an API key — stored in your Keychain."
+            case .openAI?: "A hosted service: text is sent to it. The key is stored in your Keychain."
             default: "Any server speaking OpenAI's chat completions API. A key, if needed, is stored in your Keychain."
             }
         }
@@ -407,12 +449,173 @@ private struct ChatGPTFields: View {
     }
 }
 
+private struct AnthropicFields: View {
+    @Bindable var model: AppModel
+    @Binding var config: BackendConfig
+    @ViewState private var apiKey = ""
+    @ViewState private var loadedBackendID = ""
+    @ViewState private var catalog = AnthropicModelCatalogState()
+    @ViewState private var fetchTask: Task<Void, Never>?
+    @ViewState private var showAdvanced = false
+
+    private var settings: Binding<AnthropicSettings> {
+        Binding(
+            get: { config.anthropic ?? AnthropicSettings() },
+            set: { config.anthropic = $0 }
+        )
+    }
+
+    private var hasKey: Bool {
+        #if DEBUG
+        if model.isPreview { return model.previewConnectedBackendIDs.contains(config.id) }
+        #endif
+        return !apiKey.isEmpty
+    }
+
+    private var displayedModels: [AnthropicModel] {
+        #if DEBUG
+        if model.isPreview { return model.previewAnthropicModels }
+        #endif
+        return catalog.models
+    }
+
+    private var selectedModel: AnthropicModel? {
+        if settings.wrappedValue.model.isEmpty { return displayedModels.first }
+        return displayedModels.first { $0.id == settings.wrappedValue.model }
+    }
+
+    private var thinkingOptions: [String] {
+        selectedModel?.allowedThinkingLevels ?? ([""] + Reasoning.anthropicLevels)
+    }
+
+    private var thinkingNote: String? {
+        guard let selectedModel, !selectedModel.thinking.canDisableThinking else { return nil }
+        let fallback = Reasoning.displayName(selectedModel.resolvedThinkingLevel(for: "off"))
+        return "\(selectedModel.displayName) doesn't support turning thinking off; Off uses \(fallback)."
+    }
+
+    var body: some View {
+        Group {
+            TextField("Name", text: $config.name)
+            SecureField("API key", text: $apiKey, prompt: Text("sk-ant-…"))
+                .onChange(of: apiKey) {
+                    guard !model.isPreview, loadedBackendID == config.id else { return }
+                    let id = config.id
+                    Keychain.write(apiKey, for: config.keychainAccount)
+                    startModelRefresh()
+                    Task { await model.refreshStatuses(only: id) }
+                }
+            Picker("Model", selection: settings.model) {
+                Text(catalog.isLoading ? "Loading models…" : "First available model").tag("")
+                ForEach(displayedModels) { Text($0.displayName).tag($0.id) }
+                if !settings.wrappedValue.model.isEmpty,
+                   !displayedModels.contains(where: { $0.id == settings.wrappedValue.model }) {
+                    Text(settings.wrappedValue.model).tag(settings.wrappedValue.model)
+                }
+            }
+            .disabled(catalog.isLoading || !hasKey)
+            if !catalog.error.isEmpty {
+                Text(catalog.error).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+            ThinkingPicker(title: "Thinking when translating", level: settings.reasoning.translate,
+                           options: thinkingOptions)
+            ThinkingPicker(title: "Thinking when explaining", level: settings.reasoning.explain,
+                           options: thinkingOptions)
+            if let thinkingNote {
+                Text(thinkingNote).font(.caption).foregroundStyle(.secondary)
+            }
+            Picker("Reads images", selection: settings.vision) {
+                Text("Detect (uses on-device OCR if unknown)").tag(VisionSupport.auto)
+                Text("Yes").tag(VisionSupport.yes)
+                Text("No — use on-device OCR").tag(VisionSupport.no)
+            }
+            DisclosureGroup("Advanced", isExpanded: $showAdvanced) {
+                TextField("Server URL", text: settings.baseURL)
+                    .onChange(of: settings.wrappedValue.baseURL) {
+                        guard !model.isPreview else { return }
+                        fetchTask?.cancel()
+                        fetchTask = nil
+                        catalog.invalidate(clearResults: true)
+                    }
+                    .onSubmit {
+                        guard !model.isPreview else { return }
+                        let id = config.id
+                        startModelRefresh()
+                        Task { await model.refreshStatuses(only: id) }
+                    }
+            }
+            HStack {
+                Link("Anthropic Console", destination: AnthropicBackend.consoleKeysURL)
+                Spacer()
+                Button("Reload Models") { startModelRefresh() }
+                    .disabled(catalog.isLoading || !hasKey)
+            }
+        }
+        .task(id: config.id) {
+            fetchTask?.cancel()
+            fetchTask = nil
+            loadedBackendID = ""
+            catalog.invalidate(clearResults: true)
+            guard !model.isPreview else {
+                #if DEBUG
+                if model.previewConnectedBackendIDs.contains(config.id) { apiKey = "sk-ant-preview" }
+                #endif
+                loadedBackendID = config.id
+                return
+            }
+            apiKey = Keychain.read(config.keychainAccount) ?? ""
+            loadedBackendID = config.id
+            startModelRefresh()
+        }
+        .onDisappear {
+            fetchTask?.cancel()
+            fetchTask = nil
+            catalog.invalidate()
+        }
+    }
+
+    private func startModelRefresh() {
+        guard !model.isPreview else { return }
+        fetchTask?.cancel()
+        fetchTask = nil
+        let key = AnthropicModelFetchKey(
+            backendID: config.id,
+            baseURL: settings.wrappedValue.baseURL,
+            apiKey: apiKey
+        )
+        guard let generation = catalog.beginFetch(for: key) else { return }
+        let snapshotConfig = config
+        fetchTask = Task {
+            let result: Result<[AnthropicModel], Error>
+            do {
+                let backend = AnthropicBackend(config: snapshotConfig, apiKey: key.apiKey)
+                let fetched = try await backend.models()
+                result = .success(fetched)
+            } catch is CancellationError {
+                return
+            } catch {
+                result = .failure(error)
+            }
+            guard !Task.isCancelled else { return }
+            let currentKey = AnthropicModelFetchKey(
+                backendID: config.id,
+                baseURL: settings.wrappedValue.baseURL,
+                apiKey: apiKey
+            )
+            guard currentKey == key else { return }
+            _ = catalog.finish(generation: generation, key: key, result: result)
+        }
+    }
+}
+
 private struct OpenAIFields: View {
     @Bindable var model: AppModel
     @Binding var config: BackendConfig
     @ViewState private var lmModels: [LMStudioModel] = []
     @ViewState private var reachable = false
     @ViewState private var apiKey = ""
+    @ViewState private var hasOAuthKey = false
+    @ViewState private var showAdvanced = false
 
     private var settings: Binding<OpenAISettings> {
         Binding(
@@ -421,51 +624,163 @@ private struct OpenAIFields: View {
         )
     }
 
+    private var isOpenRouter: Bool {
+        config.preset == .openRouter && OpenRouterAuth.isOfficialOrigin(settings.wrappedValue.baseURL)
+    }
+
+    private var isOpenRouterConnecting: Bool {
+        model.openRouterConnectingBackendID == config.id
+    }
+
+    private var isOpenRouterConnected: Bool {
+        #if DEBUG
+        if model.isPreview { return model.previewConnectedBackendIDs.contains(config.id) }
+        #endif
+        return hasOAuthKey || !apiKey.isEmpty
+    }
+
     var body: some View {
-        TextField("Name", text: $config.name)
-        TextField("Server URL", text: settings.baseURL)
-            .onSubmit { Task { await refresh() } }
-        if config.preset != .lmStudio && config.preset != .ollama {
-            SecureField(config.preset?.needsKey == true ? "API key" : "API key (optional)", text: $apiKey)
+        Group {
+            TextField("Name", text: $config.name)
+            if isOpenRouter {
+                openRouterControls
+            } else {
+                TextField("Server URL", text: settings.baseURL)
+                    .onSubmit { Task { await refresh() } }
+                if config.preset == .openRouter && hasOAuthKey {
+                    HStack {
+                        Text("Browser sign-in keys only work with https://openrouter.ai.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Restore Official URL") {
+                            settings.wrappedValue.baseURL = OpenAIPreset.openRouter.baseURL
+                            Task { await refresh() }
+                        }
+                    }
+                }
+            }
+            if config.preset != .lmStudio && config.preset != .ollama && !(isOpenRouter && isOpenRouterConnected) {
+                SecureField(
+                    config.preset?.needsKey == true ? "API key" : "API key (optional)",
+                    text: $apiKey,
+                    prompt: isOpenRouter ? Text("Or paste an OpenRouter key") : Text("")
+                )
                 .onChange(of: apiKey) {
+                    guard !model.isPreview else { return }
                     let id = config.id
                     Keychain.write(apiKey, for: config.keychainAccount)
                     Task { await model.refreshStatuses(only: id) }
                 }
-        }
-        if config.isLMStudio {
-            RecommendedModelRow(model: model, config: config, downloaded: lmModels.map(\.id), reachable: reachable,
-                                inUse: settings.wrappedValue.model.isEmpty ? lmModels.first?.id : settings.wrappedValue.model)
-        }
-        if config.isLMStudio && !lmModels.isEmpty {
-            Picker("Model", selection: settings.model) {
-                Text("First loaded model").tag("")
-                ForEach(lmModels) { item in
-                    Text(item.id + (item.canReadImages ? " · vision" : "") + (item.isLoaded ? " · loaded" : "")).tag(item.id)
+            }
+            if config.isLMStudio {
+                RecommendedModelRow(model: model, config: config, downloaded: lmModels.map(\.id), reachable: reachable,
+                                    inUse: settings.wrappedValue.model.isEmpty ? lmModels.first?.id : settings.wrappedValue.model)
+            }
+            if config.isLMStudio && !lmModels.isEmpty {
+                Picker("Model", selection: settings.model) {
+                    Text("First loaded model").tag("")
+                    ForEach(lmModels) { item in
+                        Text(item.id + (item.canReadImages ? " · vision" : "") + (item.isLoaded ? " · loaded" : "")).tag(item.id)
+                    }
+                    if !settings.wrappedValue.model.isEmpty, !lmModels.contains(where: { $0.id == settings.wrappedValue.model }) {
+                        Text(settings.wrappedValue.model).tag(settings.wrappedValue.model)
+                    }
                 }
-                if !settings.wrappedValue.model.isEmpty, !lmModels.contains(where: { $0.id == settings.wrappedValue.model }) {
-                    Text(settings.wrappedValue.model).tag(settings.wrappedValue.model)
+            } else {
+                TextField(
+                    "Model",
+                    text: settings.model,
+                    prompt: Text(isOpenRouter ? "e.g. anthropic/claude-sonnet-4.5" : "First model the server lists")
+                )
+            }
+            ThinkingPicker(title: "Thinking when translating", level: $config.reasoning.translate, options: thinkingOptions)
+            ThinkingPicker(title: "Thinking when explaining", level: $config.reasoning.explain, options: thinkingOptions)
+            if let thinkingNote {
+                Text(thinkingNote).font(.caption).foregroundStyle(.secondary)
+            }
+            Picker("Reads images", selection: settings.vision) {
+                Text(config.isLMStudio || isOpenRouter ? "Detect (vision models)" : "Auto (no)").tag(VisionSupport.auto)
+                Text("Yes").tag(VisionSupport.yes)
+                Text("No — use on-device OCR").tag(VisionSupport.no)
+            }
+            if isOpenRouter {
+                DisclosureGroup("Advanced", isExpanded: $showAdvanced) {
+                    if isOpenRouterConnected && !hasOAuthKey {
+                        SecureField("API key", text: $apiKey)
+                            .onChange(of: apiKey) {
+                                guard !model.isPreview else { return }
+                                let id = config.id
+                                Keychain.write(apiKey, for: config.keychainAccount)
+                                Task { await model.refreshStatuses(only: id) }
+                            }
+                    }
+                    TextField("Server URL", text: settings.baseURL)
+                        .onSubmit { Task { await refresh() } }
                 }
             }
-        } else {
-            TextField("Model", text: settings.model, prompt: Text("First model the server lists"))
-        }
-        ThinkingPicker(title: "Thinking when translating", level: $config.reasoning.translate, options: thinkingOptions)
-        ThinkingPicker(title: "Thinking when explaining", level: $config.reasoning.explain, options: thinkingOptions)
-        if let thinkingNote {
-            Text(thinkingNote).font(.caption).foregroundStyle(.secondary)
-        }
-        Picker("Reads images", selection: settings.vision) {
-            Text(config.isLMStudio ? "Detect (vision models)" : "Auto (no)").tag(VisionSupport.auto)
-            Text("Yes").tag(VisionSupport.yes)
-            Text("No — use on-device OCR").tag(VisionSupport.no)
         }
         .task {
-            apiKey = Keychain.read(config.keychainAccount) ?? ""
+            guard !model.isPreview else {
+                #if DEBUG
+                if isOpenRouter, model.previewConnectedBackendIDs.contains(config.id) { hasOAuthKey = true }
+                #endif
+                return
+            }
+            reloadKeys()
             await refresh()
+        }
+        .onChange(of: model.openRouterKeyVersion[config.id]) {
+            guard !model.isPreview else { return }
+            reloadKeys()
         }
         // A finished download adds a model to LM Studio's list.
         .onChange(of: model.modelDownloads[config.id]?.isActive == true) { Task { await refresh() } }
+    }
+
+    private func reloadKeys() {
+        apiKey = Keychain.read(config.keychainAccount) ?? ""
+        hasOAuthKey = config.preset == .openRouter && !(Keychain.read(config.openRouterOAuthKeychainAccount) ?? "").isEmpty
+    }
+
+    @ViewBuilder private var openRouterControls: some View {
+        let busy = model.openRouterConnectingBackendID != nil
+        if isOpenRouterConnecting {
+            LabeledContent("Sign-in") {
+                HStack {
+                    ProgressView().controlSize(.small)
+                    Text("Continue in your browser…").foregroundStyle(.secondary)
+                    Button("Cancel") { model.cancelOpenRouterConnection() }
+                }
+            }
+        } else if !isOpenRouterConnected {
+            HStack {
+                Button {
+                    model.connectOpenRouter(backendID: config.id)
+                } label: {
+                    Label("Sign in with OpenRouter", systemImage: "safari")
+                        .fontWeight(.medium)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(busy)
+                Spacer()
+                Link("Manage keys", destination: OpenRouterAuth.keysURL)
+            }
+        } else {
+            LabeledContent("Connection") {
+                Text("Connected to OpenRouter").foregroundStyle(.secondary)
+            }
+            HStack {
+                Button("Reconnect") { model.connectOpenRouter(backendID: config.id) }
+                Button("Sign Out", role: .destructive) { model.disconnectOpenRouter(backendID: config.id) }
+                Spacer()
+                Link("Manage keys", destination: OpenRouterAuth.keysURL)
+            }
+            .disabled(busy)
+        }
+        if let message = model.openRouterMessages[config.id], !message.isEmpty {
+            Text(message).foregroundStyle(.secondary).textSelection(.enabled)
+        }
     }
 
     /// The levels the chosen LM Studio model offers; any server's otherwise. nil when it can't think.

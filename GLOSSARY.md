@@ -64,7 +64,7 @@ One AI endpoint the user can choose to answer Lookups, e.g. "Apple Intelligence"
 _Avoid_: Provider, model
 
 **Backend type**:
-How Kandong connects to AI: *Apple Intelligence* (on this Mac), *ChatGPT* (a connected ChatGPT plan), or *OpenAI-compatible* (LM Studio, Ollama, hosted APIs). Apple Intelligence and ChatGPT exist once each; OpenAI-compatible Backends are added from presets.
+How Kandong connects to AI: *Apple Intelligence* (on this Mac), *ChatGPT* (a connected ChatGPT plan), *Anthropic* (native Claude Messages API), or *OpenAI-compatible* (LM Studio, Ollama, OpenRouter with browser sign-in or API key, hosted APIs). Apple Intelligence and ChatGPT exist once each; Anthropic and OpenAI-compatible Backends are added as needed.
 
 **Thinking**:
 How much a model reasons before it answers, set per Backend for translating and for explaining (off, low, … high, or the model's default).
