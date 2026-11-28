@@ -406,6 +406,7 @@ final class AppModel {
             }
             do {
                 try await openRouterAuth.authorizeAndSave(
+                    attemptID: attemptID,
                     currentBaseURL: {
                         await MainActor.run {
                             guard self.openRouterSignIn.canCommit(attemptID: attemptID, backendID: backendID, isCancelled: Task.isCancelled),
@@ -427,6 +428,9 @@ final class AppModel {
                             guard Keychain.write(key, for: current.openRouterOAuthKeychainAccount) else {
                                 throw OpenRouterAuthError.unavailable("Couldn't save the OpenRouter key in your login Keychain. Unlock it and try again.")
                             }
+                            // Durable credential write and successful state transition occur in one uninterrupted MainActor turn.
+                            _ = self.openRouterSignIn.succeed(attemptID: attemptID, backendID: backendID)
+                            self.openRouterAuthorization = nil
                         }
                     },
                     openBrowser: { url in
@@ -440,8 +444,6 @@ final class AppModel {
                         }
                     }
                 )
-                guard openRouterSignIn.succeed(attemptID: attemptID, backendID: backendID) else { return }
-                openRouterAuthorization = nil
                 await refreshStatuses(only: backendID)
             } catch is CancellationError {
                 _ = openRouterSignIn.fail(attemptID: attemptID, backendID: backendID, message: "Sign-in cancelled.")
@@ -452,10 +454,12 @@ final class AppModel {
     }
 
     func cancelOpenRouterConnection() {
-        openRouterSignIn.cancel()
+        let cancelled = openRouterSignIn.cancel()
         openRouterAuthorization?.cancel()
         openRouterAuthorization = nil
-        Task { await openRouterAuth.cancelAuthorization() }
+        if let attemptID = cancelled?.attemptID {
+            Task { await openRouterAuth.cancelAuthorization(attemptID: attemptID) }
+        }
     }
 
     func disconnectOpenRouter(backendID: String) {

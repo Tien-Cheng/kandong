@@ -66,15 +66,18 @@ public struct OpenRouterSignInState: Equatable, Sendable {
     }
 
     /// Synchronously cancels the active attempt so its commit hook and teardown become no-ops.
+    /// Returns the cancelled `(attemptID, backendID)` if an attempt was active.
     @discardableResult
-    public mutating func cancel() -> String? {
-        let backendID = connectingBackendID
+    public mutating func cancel() -> (attemptID: UUID, backendID: String)? {
+        guard let attemptID = activeAttemptID, let backendID = connectingBackendID else {
+            activeAttemptID = nil
+            connectingBackendID = nil
+            return nil
+        }
         activeAttemptID = nil
         connectingBackendID = nil
-        if let backendID {
-            messages[backendID] = "Sign-in cancelled."
-        }
-        return backendID
+        messages[backendID] = "Sign-in cancelled."
+        return (attemptID, backendID)
     }
 
     /// True only while `attemptID` is still the current, uncancelled attempt for `backendID`.
@@ -135,6 +138,7 @@ public actor OpenRouterAuth {
     private let now: @Sendable () -> Date
     private var authorizationID: UUID?
     private var callbackListener: OAuthLoopbackListener?
+    private var cancelledAttemptIDs: [UUID] = []
 
     public init(
         urlSession: URLSession = .shared,
@@ -162,7 +166,13 @@ public actor OpenRouterAuth {
         return true
     }
 
-    public func cancelAuthorization() {
+    /// Cancels the active authorization. When `attemptID` is supplied, only cancels that specific attempt
+    /// (and remembers it so a late-entering task for `attemptID` cannot reset a newer attempt).
+    public func cancelAuthorization(attemptID: UUID? = nil) {
+        if let attemptID {
+            recordCancelled(attemptID)
+            guard authorizationID == attemptID else { return }
+        }
         authorizationID = nil
         callbackListener?.cancel()
         callbackListener = nil
@@ -170,14 +180,15 @@ public actor OpenRouterAuth {
 
     /// Verifies that the target backend points to the official HTTPS OpenRouter origin both before launching
     /// browser sign-in and immediately before persisting the exchanged key, keeping the same attempt guard
-    /// active through commit so cancelled or superseded attempts cannot persist credentials.
+    /// active up to commit. Once `saveKey` succeeds, the commit is final.
     public func authorizeAndSave(
+        attemptID: UUID = UUID(),
         currentBaseURL: @escaping @Sendable () async -> String?,
         saveKey: @escaping @Sendable (String) async throws -> Void,
         openBrowser: @escaping @Sendable (URL) async throws -> Void
     ) async throws {
+        try checkCanStart(attemptID)
         cancelAuthorization()
-        let attemptID = UUID()
         let startedAt = now()
         authorizationID = attemptID
         defer {
@@ -198,15 +209,16 @@ public actor OpenRouterAuth {
         }
         try checkAttempt(attemptID, startedAt: startedAt)
         try await saveKey(key)
-        try checkAttempt(attemptID, startedAt: startedAt)
+        // Commit is final once saveKey returns without throwing; never fail after durable persistence.
     }
 
     /// Starts the local loopback listener, opens the browser for OpenRouter PKCE approval, and exchanges the code for a scoped API key.
     public func authorize(
+        attemptID: UUID = UUID(),
         openBrowser: @escaping @Sendable (URL) async throws -> Void
     ) async throws -> String {
+        try checkCanStart(attemptID)
         cancelAuthorization()
-        let attemptID = UUID()
         let startedAt = now()
         authorizationID = attemptID
         defer {
@@ -217,6 +229,20 @@ public actor OpenRouterAuth {
             }
         }
         return try await runAuthorization(attemptID: attemptID, startedAt: startedAt, openBrowser: openBrowser)
+    }
+
+    private func checkCanStart(_ id: UUID) throws {
+        if Task.isCancelled || cancelledAttemptIDs.contains(id) {
+            throw OpenRouterAuthError.cancelled
+        }
+    }
+
+    private func recordCancelled(_ id: UUID) {
+        guard !cancelledAttemptIDs.contains(id) else { return }
+        cancelledAttemptIDs.append(id)
+        if cancelledAttemptIDs.count > 64 {
+            cancelledAttemptIDs.removeFirst(cancelledAttemptIDs.count - 64)
+        }
     }
 
     private func runAuthorization(

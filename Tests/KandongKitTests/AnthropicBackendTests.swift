@@ -233,8 +233,8 @@ import Testing
         #expect(thirdBody["thinking"]?["type"]?.string == "between_tools")
         #expect(thirdBody["output_config"] == nil)
 
-        // 4. Model without metadata rejecting BOTH `disabled` and `between_tools` falls back to adaptive effort="low"
-        // (never omitting `thinking` to default higher effort).
+        // 4. Model without metadata rejecting BOTH `disabled` and `between_tools` falls back to adaptive effort="low",
+        // and preserves explicit effort="low" even if schema is also rejected.
         let bothRejected = AnthropicCounter()
         AnthropicStubProtocol.setHandler { request in
             if request.url?.path == "/v1/models" { return (200, Self.catalog, "application/json") }
@@ -245,15 +245,60 @@ import Testing
             if n == 2 {
                 return (400, #"{"error":{"type":"invalid_request_error","message":"thinking.type between_tools is not supported"}}"#, "application/json")
             }
+            if n == 3 {
+                return (400, #"{"error":{"type":"invalid_request_error","message":"output_config.format is not supported"}}"#, "application/json")
+            }
             return (200, successSSE, "text/event-stream")
         }
         let lowFallback = backend(reasoning: ReasoningSettings(translate: "off", explain: ""))
-        #expect(try await lowFallback.complete(AIRequest(system: "Translate", user: "你好")) == #"{"translation":"Hi"}"#)
+        #expect(try await lowFallback.complete(AIRequest(system: "Translate", user: "你好", schema: Prompts.translationSchema)) == #"{"translation":"Hi"}"#)
         let lowRequests = AnthropicStubProtocol.requests().filter { $0.url?.path == "/v1/messages" }
-        #expect(lowRequests.count == 3)
-        let finalBody = try JSONValue.decode(try #require(lowRequests[2].httpBody))
+        #expect(lowRequests.count == 4)
+        let finalBody = try JSONValue.decode(try #require(lowRequests[3].httpBody))
         #expect(finalBody["thinking"]?["type"]?.string == "adaptive")
         #expect(finalBody["output_config"]?["effort"]?.string == "low")
+        #expect(finalBody["output_config"]?["format"] == nil)
+
+        // 5. When an Off-derived `low` effort fallback is ALSO rejected, fail clearly and NEVER send
+        // an unbounded adaptive(effort: nil) or modelDefault request.
+        AnthropicStubProtocol.setHandler { request in
+            if request.url?.path == "/v1/models" { return (200, alwaysThinkingCatalog, "application/json") }
+            return (400, #"{"error":{"type":"invalid_request_error","message":"output_config.effort low is not supported"}}"#, "application/json")
+        }
+        let lowRejected = backend(model: "claude-always-thinking", reasoning: ReasoningSettings(translate: "off", explain: ""))
+        do {
+            _ = try await lowRejected.complete(AIRequest(system: "Translate", user: "你好", schema: Prompts.translationSchema))
+            Issue.record("Expected clear failure when Off -> low fallback is rejected")
+        } catch BackendError.failed(let message) {
+            #expect(message.contains("doesn't support turning thinking off or low thinking effort"))
+        }
+        let lowRejectedRequests = AnthropicStubProtocol.requests().filter { $0.url?.path == "/v1/messages" }
+        #expect(lowRejectedRequests.count == 1)
+        let sentBody = try JSONValue.decode(try #require(lowRejectedRequests[0].httpBody))
+        #expect(sentBody["thinking"]?["type"]?.string == "adaptive")
+        #expect(sentBody["output_config"]?["effort"]?.string == "low")
+
+        // 6. Non-Off explicit effort (e.g., high) still degrades gracefully on older models that reject effort/adaptive.
+        let highAttempts = AnthropicCounter()
+        AnthropicStubProtocol.setHandler { request in
+            if request.url?.path == "/v1/models" { return (200, Self.catalog, "application/json") }
+            let n = highAttempts.next()
+            if n == 1 {
+                return (400, #"{"error":{"type":"invalid_request_error","message":"output_config.effort is not supported"}}"#, "application/json")
+            }
+            if n == 2 {
+                return (400, #"{"error":{"type":"invalid_request_error","message":"thinking adaptive is not supported"}}"#, "application/json")
+            }
+            return (200, successSSE, "text/event-stream")
+        }
+        let highBackend = backend(reasoning: ReasoningSettings(translate: "high", explain: ""))
+        #expect(try await highBackend.complete(AIRequest(system: "Translate", user: "你好")) == #"{"translation":"Hi"}"#)
+        let highRequests = AnthropicStubProtocol.requests().filter { $0.url?.path == "/v1/messages" }
+        #expect(highRequests.count == 3)
+        let secondHigh = try JSONValue.decode(try #require(highRequests[1].httpBody))
+        #expect(secondHigh["thinking"]?["type"]?.string == "adaptive" && secondHigh["output_config"]?["effort"] == nil)
+        let thirdHigh = try JSONValue.decode(try #require(highRequests[2].httpBody))
+        #expect(thirdHigh["thinking"] == nil)
     }
 
     @Test func staleModelFetchesNeverOverwriteNewerCredentialsURLOrSelection() throws {

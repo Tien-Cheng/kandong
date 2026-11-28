@@ -310,10 +310,14 @@ public struct AnthropicBackend: AIBackend {
     struct Options: Equatable {
         var useSchema: Bool
         var thinkingMode: ThinkingMode
+        /// True when derived from the user's `"off"` setting; retries must preserve explicit `"low"` effort
+        /// rather than widening to unbounded default effort.
+        var fromOffSetting: Bool = false
     }
 
     func initialOptions(for request: AIRequest, model: AnthropicModel? = nil) -> Options {
         let wanted = config.reasoning[request.task]
+        let fromOff = wanted == "off"
         let effective = model?.resolvedThinkingLevel(for: wanted)
             ?? Reasoning.resolve(wanted, allowed: [""] + Reasoning.anthropicLevels)
         let thinkingMode: ThinkingMode
@@ -329,7 +333,11 @@ public struct AnthropicBackend: AIBackend {
         default:
             thinkingMode = .adaptive(effort: effective)
         }
-        return Options(useSchema: request.schema != nil, thinkingMode: thinkingMode)
+        return Options(useSchema: request.schema != nil, thinkingMode: thinkingMode, fromOffSetting: fromOff)
+    }
+
+    static func offFallbackUnsupportedMessage(for modelName: String) -> String {
+        "\(modelName) doesn't support turning thinking off or low thinking effort. Choose Model default or another thinking level in AI settings."
     }
 
     func body(for request: AIRequest, model: String, options: Options, modelMaxTokens: Int? = nil) -> JSONValue {
@@ -410,10 +418,12 @@ public struct AnthropicBackend: AIBackend {
             ) else { return }
 
             let lower = rawBody.lowercased()
-            // Never retry `disabled` by omitting `thinking` (which enables default adaptive thinking at higher effort).
-            // Try `between_tools` first (no upfront thinking); if that is also rejected, fall back to lowest adaptive effort ("low"),
-            // matching `ThinkingPicker`'s `Off (uses Low)` fallback.
-            if options.thinkingMode == .disabled, lower.contains("thinking") || lower.contains("disabled") {
+            // Drop unsupported structured-output schema first while preserving the active thinking mode (including Off -> low).
+            if options.useSchema,
+               lower.contains("json_schema") || lower.contains("output_config.format") || (lower.contains("format") && !lower.contains("effort")) {
+                options.useSchema = false
+            } else if options.thinkingMode == .disabled, lower.contains("thinking") || lower.contains("disabled") {
+                // Never retry `disabled` by omitting `thinking` (which enables unbounded default adaptive thinking).
                 if resolved.thinking.supportsBetweenTools != false {
                     options.thinkingMode = .betweenTools
                 } else {
@@ -421,15 +431,16 @@ public struct AnthropicBackend: AIBackend {
                 }
             } else if options.thinkingMode == .betweenTools, lower.contains("thinking") || lower.contains("between_tools") {
                 options.thinkingMode = .adaptive(effort: "low")
+            } else if case .adaptive = options.thinkingMode, options.fromOffSetting,
+                      lower.contains("thinking") || lower.contains("effort") || lower.contains("low") {
+                // Never widen an Off-derived `low` fallback to unbounded adaptive/default effort.
+                throw BackendError.failed(Self.offFallbackUnsupportedMessage(for: resolved.displayName))
             } else if case .adaptive(let effort) = options.thinkingMode, effort != nil,
                       lower.contains("effort"), !lower.contains("thinking") {
                 options.thinkingMode = .adaptive(effort: nil)
             } else if case .adaptive = options.thinkingMode,
                       lower.contains("thinking") || lower.contains("effort") {
                 options.thinkingMode = .modelDefault
-            } else if options.useSchema,
-                      lower.contains("output_config") || lower.contains("json_schema") || lower.contains("format") {
-                options.useSchema = false
             } else if options.useSchema {
                 options.useSchema = false
             } else {

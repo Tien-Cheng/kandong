@@ -288,8 +288,8 @@ import CryptoKit
         #expect(state.canCommit(attemptID: attempt1, backendID: "or-1", isCancelled: false))
 
         // Cancelling immediately invalidates attempt1 and lets a fresh attempt2 start.
-        let cancelledID = state.cancel()
-        #expect(cancelledID == "or-1")
+        let cancelled = state.cancel()
+        #expect(cancelled?.attemptID == attempt1 && cancelled?.backendID == "or-1")
         #expect(!state.canCommit(attemptID: attempt1, backendID: "or-1", isCancelled: false))
         #expect(state.messages["or-1"] == "Sign-in cancelled.")
 
@@ -308,13 +308,84 @@ import CryptoKit
         #expect(state.messages["or-1"] == "")
         #expect(state.keyVersion["or-1"] == nil)
 
-        // attempt2 commits cleanly.
+        // attempt2 commits atomically; a subsequent cancel after commit is a no-op and keeps success state.
         #expect(state.canCommit(attemptID: attempt2, backendID: "or-1", isCancelled: false))
         let newerSucceeded = state.succeed(attemptID: attempt2, backendID: "or-1")
         #expect(newerSucceeded)
         #expect(state.connectingBackendID == nil)
         #expect(state.keyVersion["or-1"] == 1)
+        let cancelAfterCommit = state.cancel()
+        #expect(cancelAfterCommit == nil)
+        #expect(state.messages["or-1"] == "")
     }
+
+    @Test func scopedCancellationAndLateSupersededTaskNeverCancelNewerAttempt() async throws {
+        let fixture = OpenRouterAuthFixture()
+        let auth = OpenRouterAuth(urlSession: fixture.network())
+        let storedKey = OpenRouterStringBox("sk-or-v1-existing")
+        let attempt1 = UUID()
+        let attempt2 = UUID()
+        let browserGate = OpenRouterGate()
+
+        // Start attempt2 first and pause it while waiting for the browser callback.
+        fixture.exchangeResponse = #"{"key":"sk-or-v1-attempt2","user_id":"user_2"}"#
+        let task2 = Task {
+            try await auth.authorizeAndSave(
+                attemptID: attempt2,
+                currentBaseURL: { "https://openrouter.ai/api/v1" },
+                saveKey: { storedKey.set($0) },
+                openBrowser: { url in
+                    await browserGate.arriveAndWait()
+                    try await fixture.openBrowser(url)
+                }
+            )
+        }
+        await browserGate.waitUntilArrived()
+
+        // Late scoped cancel for an older attempt1 must NOT cancel active attempt2.
+        await auth.cancelAuthorization(attemptID: attempt1)
+
+        // A late-entering task for already-cancelled attempt1 must throw cancelled WITHOUT resetting attempt2.
+        await #expect(throws: OpenRouterAuthError.cancelled) {
+            try await auth.authorizeAndSave(
+                attemptID: attempt1,
+                currentBaseURL: { "https://openrouter.ai/api/v1" },
+                saveKey: { storedKey.set($0) },
+                openBrowser: { url in try await fixture.openBrowser(url) }
+            )
+        }
+
+        // Release attempt2; it must complete and save cleanly.
+        await browserGate.release()
+        try await task2.value
+        #expect(storedKey.value == "sk-or-v1-attempt2")
+    }
+
+    @Test func commitIsFinalEvenIfClockPassesExpiryDuringSaveKey() async throws {
+        let fixture = OpenRouterAuthFixture()
+        let clock = OpenRouterClock(Date(timeIntervalSince1970: 2_000_000_000))
+        let auth = OpenRouterAuth(urlSession: fixture.network(), now: { clock.value })
+        let storedKey = OpenRouterStringBox(nil)
+
+        try await auth.authorizeAndSave(
+            currentBaseURL: { "https://openrouter.ai/api/v1" },
+            saveKey: { key in
+                storedKey.set(key)
+                // Clock crosses 600s deadline while persisting; durable commit must still succeed.
+                clock.advance(601)
+            },
+            openBrowser: { url in try await fixture.openBrowser(url) }
+        )
+        #expect(storedKey.value == "sk-or-v1-minted-key")
+    }
+}
+
+private final class OpenRouterClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var date: Date
+    init(_ initial: Date) { date = initial }
+    var value: Date { lock.withLock { date } }
+    func advance(_ seconds: TimeInterval) { lock.withLock { date.addTimeInterval(seconds) } }
 }
 
 private final class OpenRouterStringBox: @unchecked Sendable {
